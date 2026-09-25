@@ -15,7 +15,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_OSX_SYSROOT=macosx -DNOGRAP
   -DNOGRAPHICSAPI_BUILD_TESTS=ON -DNOGRAPHICSAPI_SLANGC=/path/to/slangc
 cmake --build build
 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build --output-on-failure
-build/examples/triangle/example_triangle --frames 8
+build/examples/triangle/example_triangle
 ```
 
 The 25 September 2026 Release review passes 29 of 30 CTests with Metal API validation. The full suite retains

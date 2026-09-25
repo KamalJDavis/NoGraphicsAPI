@@ -196,7 +196,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_SYSROOT=macosx -DNOGR
   -DNOGRAPHICSAPI_BUILD_TESTS=ON -DNOGRAPHICSAPI_SLANGC=/path/to/slangc
 cmake --build build
 ctest --test-dir build --output-on-failure
-build/examples/triangle/example_triangle --frames 8
+build/examples/triangle/example_triangle
 ```
 
 Examples use native AppKit windows with `CAMetalLayer`. The shader helper emits precompiled Metal

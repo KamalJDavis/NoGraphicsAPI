@@ -73,10 +73,7 @@ namespace {
 
 } // namespace
 
-int main(int argc, char** argv) {
-    uint64 frame_limit = 0;
-    if (!example_frame_limit(argc, argv, frame_limit)) return 1;
-    uint64 rendered_frames = 0;
+int main() {
 	// Init
 	void* window = open_example_window("NoGraphicsAPI spinning textured cube", width, height);
     Device* device = create_device({.window = window, .swapchain_format = Format::bgra8_srgb}).device;
@@ -94,14 +91,6 @@ int main(int argc, char** argv) {
 	// Shaders
     const Span<byte> vertex_code = read_shader(NOGRAPHICSAPI_CUBE_VERTEX_SHADER_PATH);
     const Span<byte> fragment_code = read_shader(NOGRAPHICSAPI_CUBE_FRAGMENT_SHADER_PATH);
-    if (!vertex_code.data || !fragment_code.data)
-    {
-        free(fragment_code.data);
-        free(vertex_code.data);
-        destroy_device(device);
-        close_example_window(window);
-        return 1;
-    }
 	PSO* cube_pso = create_graphics_pso(device, {
         .vertex = {.code = {vertex_code.data, vertex_code.size}, .entry_point = "vertexMain"},
         .fragment = {.code = {fragment_code.data, fragment_code.size}, .entry_point = "fragmentMain"},
@@ -165,7 +154,7 @@ int main(int argc, char** argv) {
 	uint64 frame_index = 0;
     const float4x4 view = math::look_at_rh({.x = 0.0f, .y = 3.0f, .z = 5.0f}, {.x = 0.0f, .y = 0.0f, .z = 0.0f}, {.x = 0.0f, .y = 1.0f, .z = 0.0f});
 
-	while ((!frame_limit || rendered_frames < frame_limit) && pump_example_window(window))
+	while (pump_example_window(window))
 	{
         if (latest_completion.value >= 2)
             wait_timeline({.semaphore = latest_completion.semaphore, .value = latest_completion.value - 1});
@@ -232,7 +221,6 @@ int main(int argc, char** argv) {
         end_commands(commands);
         latest_completion.value++;
 		submit_and_present(device, {.commands = {commands}, .completion = latest_completion});
-        ++rendered_frames;
 	}
 
     wait_idle(device);

@@ -148,11 +148,8 @@ void initialize_object_data(ObjectData* objects) noexcept
 
 } // namespace
 
-int main(int argc, char** argv)
+int main()
 {
-    uint64 frame_limit = 0;
-    if (!example_frame_limit(argc, argv, frame_limit)) return 1;
-    uint64 rendered_frames = 0;
     // Init
     void* window = open_example_window("NoGraphicsAPI deferred renderer", initial_width, initial_height);
     Device* device = create_device({.window = window, .swapchain_format = Format::bgra8_srgb}).device;
@@ -173,17 +170,6 @@ int main(int argc, char** argv)
     const Span<byte> gbuffer_fragment_code = read_shader(NOGRAPHICSAPI_GBUFFER_FRAGMENT_SHADER_PATH);
     const Span<byte> deferred_vertex_code = read_shader(NOGRAPHICSAPI_DEFERRED_VERTEX_SHADER_PATH);
     const Span<byte> deferred_fragment_code = read_shader(NOGRAPHICSAPI_DEFERRED_FRAGMENT_SHADER_PATH);
-    if (!simulation_code.data || !gbuffer_mesh_code.data || !gbuffer_fragment_code.data || !deferred_vertex_code.data || !deferred_fragment_code.data)
-    {
-        free(deferred_fragment_code.data);
-        free(deferred_vertex_code.data);
-        free(gbuffer_fragment_code.data);
-        free(gbuffer_mesh_code.data);
-        free(simulation_code.data);
-        destroy_device(device);
-        close_example_window(window);
-        return 1;
-    }
     PSO* simulation_pso = create_compute_pso(device, {
         .code = {simulation_code.data, simulation_code.size}, .entry_point = "computeMain",
         .threadgroup_size = {.x = simulation_thread_count, .y = 1, .z = 1},
@@ -247,7 +233,7 @@ int main(int argc, char** argv)
     DeleteQueue delete_queue(latest_completion.semaphore, frames_in_flight);
     CommandPool* command_pools[frames_in_flight] = {create_command_pool(device), create_command_pool(device)};
 
-    while ((!frame_limit || rendered_frames < frame_limit) && pump_example_window(window))
+    while (pump_example_window(window))
     {
         // Limit the application to two frames in flight so double-buffered descriptors are safe to reuse
         if (latest_completion.value >= frames_in_flight)
@@ -377,7 +363,6 @@ int main(int argc, char** argv)
         end_commands(commands);
         latest_completion.value++;
         submit_and_present(device, {.commands = {commands}, .completion = latest_completion});
-        ++rendered_frames;
     }
 
     wait_idle(device);

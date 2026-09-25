@@ -4,9 +4,7 @@
 
 // Free the returned buffer after creating the PSO that uses it.
 gpu::Span<byte> read_shader(const char* path) noexcept;
-bool read_binary_file(const char* path, gpu::Span<byte> data) noexcept;
-
-bool example_frame_limit(int argc, char** argv, uint64& frame_limit) noexcept;
+void read_binary_file(const char* path, gpu::Span<byte> data) noexcept;
 
 double example_time_seconds() noexcept;
 
