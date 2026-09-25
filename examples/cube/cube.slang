@@ -1,6 +1,7 @@
+#include <NoGraphicsAPI/shader.slang>
 #include "cube_shared.h"
 
-[[vk::push_constant]] ConstantBuffer<CubeRootArguments> root;
+GPU_ROOT(CubeRootArguments, root);
 
 struct VertexOutput
 {
@@ -25,8 +26,8 @@ VertexOutput vertexMain(uint vertex_id : SV_VertexID)
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target0
 {
-    Texture2D<float4> texture = ResourceDescriptorHeap[0];
-    SamplerState sampler = SamplerDescriptorHeap[0];
+    Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(0);
+    SamplerState sampler = gpu_sampler(0);
 
     float3 normal = normalize(cross(ddx(input.fragment_position), ddy(input.fragment_position)));
     float light = max(0.0f, dot(float3(0.424f, 0.566f, 0.707f), normal));

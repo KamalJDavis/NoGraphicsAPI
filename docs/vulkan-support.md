@@ -1,4 +1,4 @@
-# Vulkan support
+# Vulkan implementation
 
 `NoGraphicsAPI` uses Vulkan 1.4 plus a small set of recent extensions to implement the model from
 [*No Graphics API*](https://www.sebastianaaltonen.com/blog/no-graphics-api):
@@ -15,17 +15,6 @@ but they do not shape the application-facing model.
 The current backend targets desktop Vulkan 1.4. MoltenVK is intentionally unsupported, and Win32 is
 the only presentation backend. Headless library builds are supported on the other configured
 desktop platforms.
-
-## Compatibility target
-
-Mesh shaders, buffer device address, and native descriptor heaps define the required graphics model.
-Other differences should be handled by backend adaptations or optional capabilities, including device
-address commands, unified image layouts, and timestamp support. Profiling must not exclude a device
-from ordinary rendering.
-
-The priority targets are desktop PCs, ROG Ally, and Intel on Windows, with support determined by the
-drivers available for those systems. The requirements below describe the current implementation,
-which still has stricter checks than this target.
 
 ## Vulkan feature surface
 
@@ -45,7 +34,7 @@ conventional feature checked by device creation.
 | Vulkan 1.3 `synchronization2` and `dynamicRendering` | Resource-free barriers and rendering without render-pass or framebuffer objects. |
 | Core Vulkan dynamic state | Command-set viewport, scissor, and exposed depth/stencil state. |
 | Timeline semaphores | Application-visible completion points and cross-queue waits; private swapchain retirement. |
-| 64-bit timestamps (optional) | Supported queues resolve GPU markers to application-owned GPU addresses by submission completion. |
+| 64-bit timestamps (optional) | Supported queues capture GPU markers; `read_timestamps(pool)` retrieves them into CPU memory after submission completion. |
 | Shader and layout features | Scalar layout, float16, 16-bit push/storage access, draw parameters, independent blending, and formatless storage-image access. |
 | Texture features | At least BC or ASTC LDR compression; exact format and usage support remains queryable. |
 | Win32 WSI | `VK_KHR_surface`, `VK_KHR_win32_surface`, `VK_KHR_swapchain`, and the maintenance extensions listed below. |
@@ -64,7 +53,7 @@ prefer a non-host-visible type, but can use a host-visible UMA type without mapp
 There is no host-only or non-coherent fallback path.
 
 `create_gpu_heap()` returns one application-sized block. `cpu_visible`, `gpu_only`, and `readback`
-provide addressable data storage; the two descriptor memory types provide mapped descriptor storage.
+provide addressable data storage. Opaque texture and sampler descriptor heaps use separate creation APIs.
 `GpuCpuRange<T>::size` is always bytes, regardless of `T`, and a GPU-only heap has a null CPU pointer.
 
 The backend has no data suballocator. The optional utility library provides fixed-16-byte
@@ -108,6 +97,8 @@ owning heap. Buffers therefore never need descriptor slots.
 | `dispatch_indirect()` | `vkCmdDispatchIndirect2KHR`. |
 | Buffer and texture copies | `vkCmdCopyMemoryKHR`, `vkCmdCopyMemoryToImageKHR`, and `vkCmdCopyImageToMemoryKHR`. |
 
+Vulkan always reports `DeviceCaps::indirect_mesh_draw`; the required mesh and device-address-command extensions provide it.
+
 Address commands use fully bound storage-buffer ranges. Interior ranges are valid, so applications
 can suballocate and pass only the relevant byte interval. Interior-pointer alignment, bounds, and
 lifetime remain the caller's contract.
@@ -117,15 +108,17 @@ in root data; indexed draws bind only the index address range required by Vulkan
 
 ## Application-owned descriptor heaps
 
-Texture and sampler descriptors live in separate mapped `GpuHeap` values created with
-`MemoryType::texture_descriptor_heap` and `MemoryType::sampler_descriptor_heap`. The application
-decides their sizes and addresses slots with `DeviceCaps::texture_descriptor_size` and
-`DeviceCaps::sampler_descriptor_size`.
+Texture and sampler descriptors live in opaque `TextureDescriptorHeap` and `SamplerDescriptorHeap`
+objects created with application-selected slot capacities. `write_texture_descriptor(heap, index, ...)`
+and `write_sampler_descriptor(heap, index, ...)` encode descriptors into private mapped storage.
+`copy_texture_descriptors()` and `copy_sampler_descriptors()` copy indexed ranges synchronously on the CPU,
+including overlapping ranges. Native bytes, strides, reserved regions, and GPU addresses remain private.
 
-`write_texture_descriptor()` and `write_sampler_descriptor()` ask Vulkan to encode one descriptor
-at the selected CPU address. `set_texture_descriptor_heap()` and `set_sampler_descriptor_heap()` bind
-the corresponding GPU ranges. Shaders index Slang's `ResourceDescriptorHeap` and
-`SamplerDescriptorHeap`; heap-using shaders compile for [`SPV_EXT_descriptor_heap`][spirv-heap].
+`set_texture_descriptor_heap()` and `set_sampler_descriptor_heap()` bind those heaps. Shaders retain
+native resource and sampler heap access through the shared `gpu_texture` and `gpu_sampler`
+helpers; heap-using shaders compile for
+[`SPV_EXT_descriptor_heap`][spirv-heap]. Arbitrary GPU writes or copies of descriptor bytes are not part of
+this portable contract.
 
 Texture views can select a compatible format only when `TextureDesc::mutable_format` is enabled;
 they can select a mip/layer range and color, depth, or stencil aspect. The default
@@ -133,8 +126,8 @@ they can select a mip/layer range and color, depth, or stencil aspect. The defau
 directly, so there is no public sampler object. Buffers use GPU pointers instead of resource-heap
 entries.
 
-The application owns descriptor-slot reuse. A slot cannot be overwritten while in-flight work may
-read it. This is intentionally the same explicit lifetime model used for mapped heap suballocations.
+The application owns descriptor-slot reuse. Concurrent destinations must be disjoint and copy
+sources stable. A slot cannot be overwritten while in-flight work may read it. This is intentionally the same explicit lifetime model used for mapped heap suballocations.
 
 ## Placed texture storage
 
@@ -181,8 +174,8 @@ GPU-resident vertex and pixel roots, while Vulkan push data has a CPU source. `N
 therefore places one shared root in push-data storage. Shader-visible pointer fields and descriptor
 indices retain the proposed model, but roots cannot be generated or selected by the GPU.
 
-Shared C++/Slang structures use C layout, with row-major matrix layout where needed. Slang
-2026.14.1 or newer is required for the native descriptor-heap path.
+Shared C++/Slang structures use C layout and row-major matrices. Slang 2026.14.1+ and
+SPIRV-Tools 2026.3+ are required; see [the shader contract](slang.md).
 
 ## Resource-free barriers and unified image layout
 
@@ -205,7 +198,9 @@ for actual read/write hazards and use timeline points for reuse of mutable CPU/G
 
 ## Pipelines, rendering, and mesh work
 
-Graphics, mesh, and compute PSOs consume SPIR-V directly. Vulkan 1.4 maintenance5 lets pipeline
+Graphics, mesh, and compute PSOs accept `ShaderStage` with SPIR-V in byte-sized `code`,
+and an explicit `entry_point` (default `main`). Vulkan ignores `threadgroup_size`; SPIR-V carries that metadata.
+Vulkan 1.4 maintenance5 lets pipeline
 stages take inline `VkShaderModuleCreateInfo`, and descriptor-heap pipelines need no pipeline
 layout. Graphics and mesh PSOs retain attachment compatibility, rasterization, and blend state;
 viewport, scissor, and the public depth/stencil state are set independently on the command buffer.
@@ -224,23 +219,23 @@ commands, synchronization, or other passes between segments. Each buffer sets it
 
 The raster path has empty fixed vertex input because shaders fetch through GPU pointers. Mesh PSOs
 use `VK_EXT_mesh_shader`, with task and mesh support enabled as part of the fixed device baseline.
-`MeshPSODesc::task_spirv` adds `taskMain` before `meshMain`; direct and indirect draw counts then launch
-task workgroups, which cull or expand work through their payload and mesh dispatch. Empty task SPIR-V
+`MeshPSODesc::task` adds a task stage before `mesh`; direct and indirect draw counts then launch
+task workgroups, which cull or expand work through their payload and mesh dispatch. Empty task code
 launches mesh workgroups directly. `Stage::task` names task-stage hazards in barriers. All graphics
 stages share the same root ABI and descriptor heaps.
 
 ## Submission, presentation, and lifetime
 
-`write_timestamp(commands, gpu_destination)` captures a 64-bit timestamp, defaulting to `Stage::all_commands`.
+`write_timestamp(commands, cpu_destination)` captures a 64-bit timestamp, defaulting to `Stage::all_commands`.
 `DeviceDesc::timestamp_query_count` sets each command buffer's capacity and defaults to 256. Zero disables timestamps and their pool/storage allocation.
 Timestamp calls are ignored and leave their destinations unchanged when disabled or when the command buffer's queue lacks 64-bit counters
 or host query reset support. These capabilities do not restrict device or queue selection, and unsupported queues allocate no timestamp storage.
-Markers target distinct, 8-byte-aligned destinations. The backend copies private query results to those
-addresses through `vkCmdCopyQueryPoolResultsToMemoryKHR`, outside rendering and after any suspended chain.
-Markers are valid inside each rendering segment, but not between suspension and resumption.
-The backend makes copied results host-visible. Read mapped `MemoryType::readback` destinations after the submission timeline completes,
-and multiply unsigned tick differences by `DeviceCaps::timestamp_period_ns` to obtain nanoseconds. Results are published at completion;
-markers do not make results available to subsequent commands within the same submission. Timestamp storage follows command-pool reuse and destruction.
+After every submission from a pool completes, call `read_timestamps(pool)` before resetting it. The backend batches
+`vkGetQueryPoolResults` without `VK_QUERY_RESULT_WAIT_BIT` and writes the results to the supplied CPU destinations.
+There are no timestamp GPU copies, resolve barriers, or additional waits. Destinations remain valid and distinct until retrieval.
+Unread results are discarded on pool reset; unsubmitted buffers are ignored. Markers are valid inside each rendering segment,
+but not between suspension and resumption. Multiply unsigned tick differences by `DeviceCaps::timestamp_period_ns` to obtain nanoseconds.
+Timestamp storage follows command-pool reuse and destruction.
 
 Command buffers are one-shot recording handles allocated from explicit command pools. End each buffer
 before submitting any subset to a selected queue. Other pools can continue recording independently.

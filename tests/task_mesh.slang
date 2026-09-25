@@ -1,6 +1,7 @@
+#include <NoGraphicsAPI/shader.slang>
 #include "task_mesh_shared.h"
 
-[[vk::push_constant]] ConstantBuffer<TaskMeshRoot> root;
+GPU_ROOT(TaskMeshRoot, root);
 
 struct TaskTestVertex
 {
@@ -25,7 +26,9 @@ void meshMain(uint lane : SV_GroupIndex, uint3 group_id : SV_GroupID, in payload
     {
         float x = float(id * 4 + 1 + (lane & 1) * 2) / float(task_test_width) * 2.0f - 1.0f;
         float y = float(2 + (lane >> 1) * 4) / float(task_test_height) * 2.0f - 1.0f;
-        vertices[lane].position = float4(x, y, 0.5f, 1.0f);
+        TaskTestVertex vertex;
+        vertex.position = float4(x, y, 0.5f, 1.0f);
+        vertices[lane] = vertex;
     }
     if (lane < 2) triangles[lane] = lane == 0 ? uint3(0, 1, 2) : uint3(2, 1, 3);
 }

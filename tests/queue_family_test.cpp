@@ -1,5 +1,6 @@
 #include <NoGraphicsAPI/NoGraphicsAPI.hpp>
 #include "queue_family_shared.h"
+#include "shader_code.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,23 +26,20 @@ struct Fixture
     GpuHeap upload{};
     GpuHeap data{};
     GpuHeap readback{};
-    GpuHeap descriptors{};
+    TextureDescriptorHeap* descriptors = nullptr;
     TextureHeap texture_heap{};
     Texture* textures[2]{};
     RenderView* target = nullptr;
-    bool copy_timestamps = false;
 };
 
 static bool initialize(Fixture& fixture) noexcept
 {
-    FILE* file = fopen(NOGRAPHICSAPI_QUEUE_FAMILY_SPV, "rb");
-    if (!file) { fprintf(stderr, "Cannot open queue-family test shader.\n"); return false; }
-    uint32 code[8192]{};
-    const size_t size = fread(code, 1, sizeof(code), file);
-    const bool valid = size >= 20 && size % sizeof(uint32) == 0 && !ferror(file) && feof(file) && code[0] == 0x07230203u;
-    fclose(file);
-    if (!valid) { fprintf(stderr, "Invalid queue-family test shader.\n"); return false; }
-    fixture.compute = create_compute_pso(fixture.device, {code, size / sizeof(uint32)});
+    Span<byte> code = load_test_shader(NOGRAPHICSAPI_QUEUE_FAMILY_SPV);
+    if (!code.data) return false;
+    fixture.compute = create_compute_pso(fixture.device, {.code = {code.data, code.size},
+        .entry_point = "computeMain", .threadgroup_size = {.x = 8, .y = 8, .z = 1}});
+    free(code.data);
+    if (!fixture.compute) return false;
     const DeviceCaps& caps = get_device_caps(fixture.device);
     fixture.queues[0] = caps.copy_queue_count ? caps.general_queue_count + caps.compute_queue_count : 0;
     fixture.queues[1] = caps.compute_queue_count ? caps.general_queue_count : 0;
@@ -50,7 +48,7 @@ static bool initialize(Fixture& fixture) noexcept
     fixture.upload = create_gpu_heap(fixture.device, 2 * slot_bytes);
     fixture.data = create_gpu_heap(fixture.device, 2 * slot_bytes, MemoryType::gpu_only);
     fixture.readback = create_gpu_heap(fixture.device, 4 * slot_bytes, MemoryType::readback);
-    fixture.descriptors = create_gpu_heap(fixture.device, 2 * caps.texture_descriptor_size, MemoryType::texture_descriptor_heap);
+    fixture.descriptors = create_texture_descriptor_heap(fixture.device, 2);
     const TextureDesc description{
         .extent = {.x = queue_test_width, .y = queue_test_height, .z = 1},
         .usage = TextureUsage::sampled | TextureUsage::storage | TextureUsage::color_attachment |
@@ -63,8 +61,8 @@ static bool initialize(Fixture& fixture) noexcept
     fixture.textures[0] = create_texture(commands, description, fixture.texture_heap, 0);
     fixture.textures[1] = create_texture(commands, description, fixture.texture_heap, second_offset);
     fixture.target = create_render_view(fixture.textures[1]);
-    write_texture_descriptor(fixture.device, fixture.descriptors.range.cpu, fixture.textures[0], TextureDescriptorType::sampled);
-    write_texture_descriptor(fixture.device, fixture.descriptors.range.cpu + caps.texture_descriptor_size,
+    write_texture_descriptor(fixture.descriptors, 0, fixture.textures[0], TextureDescriptorType::sampled);
+    write_texture_descriptor(fixture.descriptors, 1,
                              fixture.textures[1], TextureDescriptorType::storage);
     end_commands(commands);
     submit(fixture.device, {.commands = {commands}, .completion = {.semaphore = fixture.signals[0], .value = fixture.value}}, fixture.queues[0]);
@@ -86,44 +84,42 @@ static bool run_case(Fixture& fixture, uint32 iteration) noexcept
         pixel[3] = 255;
     }
     memset(fixture.readback.range.cpu, 0xa5, size_t(fixture.readback.range.size));
-    uint64* timestamp_gpu = reinterpret_cast<uint64*>(fixture.readback.range.gpu + timestamp_offset);
-    // NVIDIA 596.99 loses the device when resolving copy-queue timestamps; --copy-timestamps is the explicit reproducer.
-    const bool copy_timestamps = fixture.queues[0] == 0 || fixture.copy_timestamps;
+    uint64* timestamp_cpu = reinterpret_cast<uint64*>(fixture.readback.range.cpu + timestamp_offset);
     CommandBuffer* producer = begin_commands(fixture.pools[0]);
-    if (copy_timestamps) write_timestamp(producer, timestamp_gpu);
+    write_timestamp(producer, timestamp_cpu);
     copy_memory(producer, {.gpu = fixture.upload.range.gpu, .size = data_bytes}, {.gpu = fixture.data.range.gpu, .size = data_bytes});
     copy_memory_to_texture(producer, {.gpu = fixture.upload.range.gpu + slot_bytes, .size = data_bytes}, fixture.textures[0]);
-    if (copy_timestamps) write_timestamp(producer, timestamp_gpu + 1);
+    write_timestamp(producer, timestamp_cpu + 1);
     end_commands(producer);
 
     CommandBuffer* compute = begin_commands(fixture.pools[1]);
-    write_timestamp(compute, timestamp_gpu + 2);
+    write_timestamp(compute, timestamp_cpu + 2);
     bind_pso(compute, fixture.compute);
-    set_texture_descriptor_heap(compute, gpu_range(fixture.descriptors));
+    set_texture_descriptor_heap(compute, fixture.descriptors);
     dispatch(compute, QueueFamilyRoot{
         .source = reinterpret_cast<uint32*>(fixture.data.range.gpu),
         .destination = reinterpret_cast<uint32*>(fixture.data.range.gpu + slot_bytes),
         .source_texture = 0,
         .destination_texture = 1,
     }, {.x = (queue_test_width + 7) / 8, .y = (queue_test_height + 7) / 8, .z = 1});
-    write_timestamp(compute, timestamp_gpu + 3);
+    write_timestamp(compute, timestamp_cpu + 3);
     end_commands(compute);
 
     CommandBuffer* graphics = begin_commands(fixture.pools[2]);
-    write_timestamp(graphics, timestamp_gpu + 4);
+    write_timestamp(graphics, timestamp_cpu + 4);
     copy_memory(graphics, {.gpu = fixture.data.range.gpu + slot_bytes, .size = data_bytes}, {.gpu = fixture.readback.range.gpu, .size = data_bytes});
     copy_texture_to_memory(graphics, fixture.textures[1], {.gpu = fixture.readback.range.gpu + slot_bytes, .size = data_bytes});
     barrier(graphics, Stage::transfer, Access::transfer_read, Stage::color_output, Access::color_write);
     begin_render_pass(graphics, {.colors = {{.render_view = fixture.target, .load = LoadOp::clear, .clear = {.x = 1.0f, .w = 1.0f}}}});
     end_render_pass(graphics);
-    write_timestamp(graphics, timestamp_gpu + 5);
+    write_timestamp(graphics, timestamp_cpu + 5);
     end_commands(graphics);
 
     CommandBuffer* readback = begin_commands(fixture.pools[0]);
-    if (copy_timestamps) write_timestamp(readback, timestamp_gpu + 6);
+    write_timestamp(readback, timestamp_cpu + 6);
     copy_texture_to_memory(readback, fixture.textures[1], {.gpu = fixture.readback.range.gpu + 2 * slot_bytes, .size = data_bytes});
     barrier(readback, Stage::transfer, Access::transfer_write, Stage::host, Access::host_read);
-    if (copy_timestamps) write_timestamp(readback, timestamp_gpu + 7);
+    write_timestamp(readback, timestamp_cpu + 7);
     end_commands(readback);
 
     CommandBuffer* commands[]{producer, compute, graphics};
@@ -154,6 +150,7 @@ static bool run_case(Fixture& fixture, uint32 iteration) noexcept
     submit(fixture.device, {.commands = {readback}, .waits = {{.semaphore = fixture.signals[2], .value = fixture.value}},
                             .completion = {.semaphore = fixture.signals[3], .value = fixture.value}}, fixture.queues[0]);
     wait_timeline({.semaphore = fixture.signals[3], .value = fixture.value});
+    for (CommandPool* pool : fixture.pools) read_timestamps(pool);
 
     bool valid = true;
     for (uint32 index = 0; index < data_bytes / 4; ++index)
@@ -168,7 +165,6 @@ static bool run_case(Fixture& fixture, uint32 iteration) noexcept
     const uint64* timestamps = reinterpret_cast<const uint64*>(fixture.readback.range.cpu + timestamp_offset);
     for (uint32 index = 0; index < 8; index += 2)
     {
-        if (!copy_timestamps && (index == 0 || index == 6)) continue;
         valid = timestamps[index] != 0xa5a5a5a5a5a5a5a5ull && timestamps[index + 1] != 0xa5a5a5a5a5a5a5a5ull &&
                 timestamps[index + 1] >= timestamps[index] && valid;
     }
@@ -189,7 +185,7 @@ static void shutdown(Fixture& fixture) noexcept
     destroy_render_view(fixture.target);
     for (Texture* texture : fixture.textures) destroy_texture(texture);
     destroy_texture_heap(fixture.texture_heap);
-    destroy_gpu_heap(fixture.descriptors);
+    destroy_texture_descriptor_heap(fixture.descriptors);
     destroy_gpu_heap(fixture.readback);
     destroy_gpu_heap(fixture.data);
     destroy_gpu_heap(fixture.upload);
@@ -205,8 +201,7 @@ int main(int argc, char** argv)
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
     const bool compute = argc == 1 || strcmp(argv[1], "--compute") == 0;
-    const bool copy_timestamps = argc == 2 && strcmp(argv[1], "--copy-timestamps") == 0;
-    const bool copy = argc == 1 || strcmp(argv[1], "--copy") == 0 || copy_timestamps;
+    const bool copy = argc == 1 || strcmp(argv[1], "--copy") == 0;
     const DeviceInit initialized = create_device({.desired_compute_queue_count = compute ? 32u : 0u,
                                                  .desired_copy_queue_count = copy ? 32u : 0u, .timestamp_query_count = 2});
     if (initialized.error != Error::none)
@@ -214,12 +209,11 @@ int main(int argc, char** argv)
         fprintf(stderr, "Dedicated queue device creation: %u.\n", uint32(initialized.error));
         return initialized.error == Error::unsupported ? 77 : 1;
     }
-    Fixture fixture{.device = initialized.device, .copy_timestamps = copy_timestamps};
+    Fixture fixture{.device = initialized.device};
     const DeviceCaps& caps = get_device_caps(fixture.device);
     printf("%s: %u general, %u compute, %u copy queues; copy granularity %u x %u x %u.\n", caps.device_name,
            caps.general_queue_count, caps.compute_queue_count, caps.copy_queue_count,
            caps.copy_texture_granularity.x, caps.copy_texture_granularity.y, caps.copy_texture_granularity.z);
-    if (copy && !copy_timestamps) printf("Copy-queue timestamps omitted: see docs/known-driver-issues.md and --copy-timestamps.\n");
     bool valid = caps.general_queue_count == 1 && caps.queue_count == 1 + caps.compute_queue_count + caps.copy_queue_count &&
                  (compute ? caps.compute_queue_count >= 1 && caps.compute_queue_count <= 32 : caps.compute_queue_count == 0) &&
                  (copy ? caps.copy_queue_count >= 1 && caps.copy_queue_count <= 32 : caps.copy_queue_count == 0);

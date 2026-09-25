@@ -2,6 +2,7 @@
 
 #if defined(NOGRAPHICSAPI_UPLOAD_QUEUE_SPV_PATH)
 #include "../../tests/shaders/upload_queue_shared.h"
+#include "../../tests/shader_code.h"
 #endif
 
 #include <stdio.h>
@@ -46,7 +47,6 @@ struct Fixture
     TimelinePoint completion{};
     GpuHeap buffer{};
     GpuHeap readback{};
-    GpuHeap timestamps{};
     TextureHeap texture_heap{};
     Texture* textures[texture_count]{};
     RenderView* attachments[2]{};
@@ -93,7 +93,6 @@ static void shutdown(Fixture& fixture)
     destroy_texture_heap(fixture.texture_heap);
     destroy_gpu_heap(fixture.buffer);
     destroy_gpu_heap(fixture.readback);
-    destroy_gpu_heap(fixture.timestamps);
     destroy_timeline_semaphore(fixture.completion.semaphore);
     destroy_device(fixture.device);
 }
@@ -108,17 +107,12 @@ static bool initialize(Fixture& fixture)
     if (!fixture.buffer.owner) return false;
     fixture.readback = create_gpu_heap(fixture.device, readback_bytes, MemoryType::readback);
     if (!fixture.readback.owner) return false;
-    fixture.timestamps = create_gpu_heap(fixture.device, timestamp_batches * 2 * sizeof(uint64) + guard_bytes * 2, MemoryType::readback);
-    if (!fixture.timestamps.owner) return false;
 #if defined(NOGRAPHICSAPI_UPLOAD_QUEUE_SPV_PATH)
-    FILE* shader = fopen(NOGRAPHICSAPI_UPLOAD_QUEUE_SPV_PATH, "rb");
-    if (!shader) { fprintf(stderr, "Cannot open upload queue compute shader.\n"); return false; }
-    uint32 code[4096]{};
-    const size_t shader_size = fread(code, 1, sizeof(code), shader);
-    const bool valid_shader = shader_size != 0 && shader_size % sizeof(uint32) == 0 && !ferror(shader) && feof(shader);
-    fclose(shader);
-    if (!valid_shader) { fprintf(stderr, "Invalid upload queue compute shader.\n"); return false; }
-    fixture.compute = create_compute_pso(fixture.device, {code, shader_size / sizeof(uint32)});
+    Span<byte> code = load_test_shader(NOGRAPHICSAPI_UPLOAD_QUEUE_SPV_PATH);
+    if (!code.data) return false;
+    fixture.compute = create_compute_pso(fixture.device, {.code = {code.data, code.size}, .entry_point = "computeMain",
+        .threadgroup_size = {.x = upload_queue_thread_count, .y = 1, .z = 1}});
+    free(code.data);
     if (!fixture.compute) return false;
 #endif
     uint64 heap_bytes = 0;
@@ -321,31 +315,43 @@ static void run_non_power_of_two(Fixture& fixture, uint32 max_pending_batches)
 static void run_empty_batches_and_destroy(Fixture& fixture)
 {
     fixture.ring = UploadQueue(fixture.device, 256);
-    memset(fixture.timestamps.range.cpu, 0xa5, size_t(fixture.timestamps.range.size));
+    uint64 storage[timestamp_batches * 2 + guard_bytes * 2 / sizeof(uint64)]{};
+    memset(storage, 0xa5, sizeof(storage));
+    uint64* timestamps = storage + guard_bytes / sizeof(uint64);
+    TimelinePoint completion{};
     for (uint32 index = 0; index < timestamp_batches; ++index)
     {
-        uint64* destination = reinterpret_cast<uint64*>(fixture.timestamps.range.gpu + guard_bytes) + index * 2;
+        uint64* destination = timestamps + index * 2;
         fixture.ring.write_timestamp(destination);
         fixture.ring.write_timestamp(destination + 1);
-        fixture.ring.flush();
+        completion = fixture.ring.flush();
     }
-    fixture.ring.wait();
+    wait_timeline(completion);
+    check(timestamps[(timestamp_batches - 1) * 2] == 0xa5a5a5a5a5a5a5a5ull,
+        "submission completion leaves CPU timestamp destinations unchanged until retrieval");
+    const uint64 waits = fixture.ring.stats().waits;
+    fixture.ring.reclaim();
+    check(fixture.ring.stats().waits == waits, "completed timestamp batches are reclaimed without another wait");
     const UploadQueueStats stats = fixture.ring.stats();
     check(stats.submissions == timestamp_batches && !stats.bytes_in_use && !stats.pending_batches,
         "timestamp-only batches submit and retire without reserving staging bytes");
-    const uint64* timestamps = reinterpret_cast<const uint64*>(fixture.timestamps.range.cpu + guard_bytes);
     for (uint32 index = 0; index < timestamp_batches; ++index)
         check(timestamps[index * 2] != 0xa5a5a5a5a5a5a5a5ull && timestamps[index * 2 + 1] != 0xa5a5a5a5a5a5a5a5ull
-            && timestamps[index * 2] <= timestamps[index * 2 + 1], "timestamp-only batches resolve both ordered timestamps");
+            && timestamps[index * 2] <= timestamps[index * 2 + 1], "timestamp-only batches retrieve both ordered timestamps");
     for (uint32 index = 0; index < guard_bytes; ++index)
-        check(fixture.timestamps.range.cpu[index] == 0xa5
-            && fixture.timestamps.range.cpu[fixture.timestamps.range.size - guard_bytes + index] == 0xa5, "timestamp guards remain unchanged");
+        check(reinterpret_cast<const uint8*>(storage)[index] == 0xa5
+            && reinterpret_cast<const uint8*>(storage)[sizeof(storage) - guard_bytes + index] == 0xa5, "timestamp guards remain unchanged");
+    uint64 destruction_timestamps[2]{0xa5a5a5a5a5a5a5a5ull, 0xa5a5a5a5a5a5a5a5ull};
     uint8 bytes[64]{};
     for (uint32 index = 0; index < sizeof(bytes); ++index) bytes[index] = uint8(index * 29 + 67);
     memcpy(fixture.expected + guard_bytes, bytes, sizeof(bytes));
+    fixture.ring.write_timestamp(destruction_timestamps);
     fixture.ring.upload_buffer({.gpu = fixture.buffer.range.gpu, .size = sizeof(bytes)}, {bytes, sizeof(bytes)});
+    fixture.ring.write_timestamp(destruction_timestamps + 1);
     check(fixture.ring.stats().pending_operations == 1, "destruction starts with an unsubmitted upload");
     fixture.ring.destroy();
+    check(destruction_timestamps[0] != 0xa5a5a5a5a5a5a5a5ull && destruction_timestamps[1] != 0xa5a5a5a5a5a5a5a5ull
+        && destruction_timestamps[0] <= destruction_timestamps[1], "destruction retrieves timestamps before destroying command pools");
     check(!fixture.ring.stats().capacity && !fixture.ring.stats().pending_operations && !fixture.ring.stats().pending_batches,
         "destruction resets the ring after flushing pending uploads");
     read_results(fixture);

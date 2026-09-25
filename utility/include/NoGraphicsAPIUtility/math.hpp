@@ -25,19 +25,102 @@
 #	if defined(__MINGW32__)
 #		error "NoGraphicsAPI math does not support MinGW"
 #	endif
-#	if defined(_M_ARM64EC) || (!defined(_M_X64) && !defined(__x86_64__))
-#		error "NoGraphicsAPI math requires an x86-64 target"
+#	if defined(_M_ARM64EC) || (!defined(_M_X64) && !defined(__x86_64__) && !(defined(__APPLE__) && defined(__aarch64__)))
+#		error "NoGraphicsAPI math requires x86-64 or Apple ARM64"
 #	endif
-#	if !defined(__AVX2__)
+#	if !defined(__aarch64__) && !defined(__AVX2__)
 #		error "NoGraphicsAPI math requires AVX2"
 #	endif
-#	if (defined(__clang__) || defined(__GNUC__)) && !defined(__FMA__)
+#	if !defined(__aarch64__) && (defined(__clang__) || defined(__GNUC__)) && !defined(__FMA__)
 #		error "NoGraphicsAPI math requires FMA"
 #	endif
 
-#	include <immintrin.h>
+#	if !defined(__aarch64__)
+#		include <immintrin.h>
+#	endif
 
 namespace NoGraphicsAPI_math_detail {
+
+#	if defined(__aarch64__)
+
+	typedef float Simd4 __attribute__((ext_vector_type(4)));
+
+	inline Simd4 load(const float4& value) noexcept {
+		Simd4 result;
+		__builtin_memcpy(&result, &value, sizeof(result));
+		return result;
+	}
+
+	inline float4 store(Simd4 value) noexcept {
+		float4 result;
+		__builtin_memcpy(&result, &value, sizeof(result));
+		return result;
+	}
+
+	inline Simd4 linear_combination(Simd4 coefficients, Simd4 row0, Simd4 row1, Simd4 row2, Simd4 row3) noexcept {
+		Simd4 result = coefficients.x * row0;
+		result = __builtin_elementwise_fma(Simd4(coefficients.y), row1, result);
+		result = __builtin_elementwise_fma(Simd4(coefficients.z), row2, result);
+		return __builtin_elementwise_fma(Simd4(coefficients.w), row3, result);
+	}
+
+	inline float4x4 transpose(const float4x4& matrix) noexcept {
+		const Simd4 row0 = load(matrix.rows[0]);
+		const Simd4 row1 = load(matrix.rows[1]);
+		const Simd4 row2 = load(matrix.rows[2]);
+		const Simd4 row3 = load(matrix.rows[3]);
+		const Simd4 even01 = __builtin_shufflevector(row0, row1, 0, 4, 2, 6);
+		const Simd4 odd01 = __builtin_shufflevector(row0, row1, 1, 5, 3, 7);
+		const Simd4 even23 = __builtin_shufflevector(row2, row3, 0, 4, 2, 6);
+		const Simd4 odd23 = __builtin_shufflevector(row2, row3, 1, 5, 3, 7);
+		return {.rows = {
+			store(__builtin_shufflevector(even01, even23, 0, 1, 4, 5)),
+			store(__builtin_shufflevector(odd01, odd23, 0, 1, 4, 5)),
+			store(__builtin_shufflevector(even01, even23, 2, 3, 6, 7)),
+			store(__builtin_shufflevector(odd01, odd23, 2, 3, 6, 7)),
+		}};
+	}
+
+	inline float4x4 mul(const float4x4& lhs, const float4x4& rhs) noexcept {
+		const Simd4 row0 = load(rhs.rows[0]);
+		const Simd4 row1 = load(rhs.rows[1]);
+		const Simd4 row2 = load(rhs.rows[2]);
+		const Simd4 row3 = load(rhs.rows[3]);
+		float4x4 result;
+		for (size_t row = 0; row != 4; ++row)
+			result.rows[row] = store(linear_combination(load(lhs.rows[row]), row0, row1, row2, row3));
+		return result;
+	}
+
+	inline float3x4 mul(const float3x4& lhs, const float3x4& rhs) noexcept {
+		const Simd4 row0 = load(rhs.rows[0]);
+		const Simd4 row1 = load(rhs.rows[1]);
+		const Simd4 row2 = load(rhs.rows[2]);
+		float3x4 result;
+		for (size_t row = 0; row != 3; ++row) {
+			const Simd4 coefficients = load(lhs.rows[row]);
+			Simd4 value = {0.0f, 0.0f, 0.0f, lhs.rows[row].w};
+			value = __builtin_elementwise_fma(Simd4(coefficients.x), row0, value);
+			value = __builtin_elementwise_fma(Simd4(coefficients.y), row1, value);
+			result.rows[row] = store(__builtin_elementwise_fma(Simd4(coefficients.z), row2, value));
+		}
+		return result;
+	}
+
+	inline float4 mul(const float4& vector, const float4x4& matrix) noexcept {
+		return store(linear_combination(load(vector), load(matrix.rows[0]), load(matrix.rows[1]), load(matrix.rows[2]), load(matrix.rows[3])));
+	}
+
+	inline float4 mul(const float4x4& matrix, const float4& vector) noexcept {
+		return mul(vector, transpose(matrix));
+	}
+
+	inline float3 mul(const float3x4& matrix, const float4& vector) noexcept {
+		const float4 result = mul(float4x4{.rows = {matrix.rows[0], matrix.rows[1], matrix.rows[2], {}}}, vector);
+		return {.x = result.x, .y = result.y, .z = result.z};
+	}
+
+#	else
 
 	inline __m128 load(const float4& value) noexcept {
 		return _mm_loadu_ps(&value.x);
@@ -136,6 +219,8 @@ namespace NoGraphicsAPI_math_detail {
 		_MM_TRANSPOSE4_PS(row0, row1, row2, row3);
 		return { { store(row0), store(row1), store(row2), store(row3) } };
 	}
+
+#	endif
 
 } // namespace NoGraphicsAPI_math_detail
 
@@ -290,12 +375,21 @@ constexpr float3& operator/=(float3& lhs, float rhs) noexcept {
 	return lhs;
 }
 
+#	if defined(__aarch64__)
+#	define NOGRAPHICSAPI_FLOAT4_BINARY_OPERATOR(symbol, intrinsic) \
+		constexpr float4 operator symbol(float4 lhs, float4 rhs) noexcept { \
+			if (!__builtin_is_constant_evaluated()) \
+				return NoGraphicsAPI_math_detail::store(NoGraphicsAPI_math_detail::load(lhs) symbol NoGraphicsAPI_math_detail::load(rhs)); \
+			return { lhs.x symbol rhs.x, lhs.y symbol rhs.y, lhs.z symbol rhs.z, lhs.w symbol rhs.w }; \
+		}
+#	else
 #	define NOGRAPHICSAPI_FLOAT4_BINARY_OPERATOR(symbol, intrinsic) \
 		constexpr float4 operator symbol(float4 lhs, float4 rhs) noexcept { \
 			if (!__builtin_is_constant_evaluated()) \
 				return NoGraphicsAPI_math_detail::store(intrinsic(NoGraphicsAPI_math_detail::load(lhs), NoGraphicsAPI_math_detail::load(rhs))); \
 			return { lhs.x symbol rhs.x, lhs.y symbol rhs.y, lhs.z symbol rhs.z, lhs.w symbol rhs.w }; \
 		}
+#	endif
 
 NOGRAPHICSAPI_FLOAT4_BINARY_OPERATOR(+, _mm_add_ps)
 NOGRAPHICSAPI_FLOAT4_BINARY_OPERATOR(-, _mm_sub_ps)
@@ -304,12 +398,21 @@ NOGRAPHICSAPI_FLOAT4_BINARY_OPERATOR(/, _mm_div_ps)
 
 #	undef NOGRAPHICSAPI_FLOAT4_BINARY_OPERATOR
 
+#	if defined(__aarch64__)
+#	define NOGRAPHICSAPI_FLOAT4_SCALAR_OPERATOR(symbol, intrinsic) \
+		constexpr float4 operator symbol(float4 value, float scalar) noexcept { \
+			if (!__builtin_is_constant_evaluated()) \
+				return NoGraphicsAPI_math_detail::store(NoGraphicsAPI_math_detail::load(value) symbol scalar); \
+			return { value.x symbol scalar, value.y symbol scalar, value.z symbol scalar, value.w symbol scalar }; \
+		}
+#	else
 #	define NOGRAPHICSAPI_FLOAT4_SCALAR_OPERATOR(symbol, intrinsic) \
 		constexpr float4 operator symbol(float4 value, float scalar) noexcept { \
 			if (!__builtin_is_constant_evaluated()) \
 				return NoGraphicsAPI_math_detail::store(intrinsic(NoGraphicsAPI_math_detail::load(value), _mm_set1_ps(scalar))); \
 			return { value.x symbol scalar, value.y symbol scalar, value.z symbol scalar, value.w symbol scalar }; \
 		}
+#	endif
 
 NOGRAPHICSAPI_FLOAT4_SCALAR_OPERATOR(+, _mm_add_ps)
 NOGRAPHICSAPI_FLOAT4_SCALAR_OPERATOR(-, _mm_sub_ps)
@@ -635,8 +738,10 @@ namespace math {
 		return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
 	}
 	constexpr float dot(float4 lhs, float4 rhs) noexcept {
+#		if !defined(__aarch64__)
 		if (!__builtin_is_constant_evaluated())
 			return _mm_cvtss_f32(_mm_dp_ps(NoGraphicsAPI_math_detail::load(lhs), NoGraphicsAPI_math_detail::load(rhs), 0xf1));
+#		endif
 		return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z + lhs.w * rhs.w;
 	}
 	constexpr float dot(quaternion lhs, quaternion rhs) noexcept {

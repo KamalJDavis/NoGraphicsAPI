@@ -72,9 +72,7 @@ int main(int argc, char** argv)
     gpu::CommandPool* middle_pool = gpu::create_command_pool(device);
     gpu::CommandPool* last_pool = gpu::create_command_pool(device);
     gpu::CommandPool* independent_pool = gpu::create_command_pool(device);
-    const gpu::GpuHeap timestamps = gpu::create_gpu_heap(device, 3 * sizeof(uint64), gpu::MemoryType::readback);
-    uint64* timestamp_cpu = reinterpret_cast<uint64*>(timestamps.range.cpu);
-    uint64* timestamp_gpu = reinterpret_cast<uint64*>(timestamps.range.gpu);
+    uint64 timestamp_cpu[3]{};
     gpu::TimelinePoint completion{.semaphore = gpu::create_timeline_semaphore(device)};
     uint32 width = 256;
     uint32 height = 192;
@@ -139,7 +137,7 @@ int main(int argc, char** argv)
         const gpu::RenderingDesc rendering{.colors = colors};
         const bool split_pass = (frame_index & 1u) != 0;
         gpu::begin_render_pass(commands, rendering, split_pass ? gpu::RenderingFlags::suspending : gpu::RenderingFlags::none);
-        gpu::write_timestamp(commands, timestamp_gpu);
+        gpu::write_timestamp(commands, timestamp_cpu);
         gpu::end_render_pass(commands);
         gpu::end_commands(commands);
         gpu::end_commands(second);
@@ -149,13 +147,13 @@ int main(int argc, char** argv)
             // Record continuations in reverse order, using the same clear description in every segment.
             gpu::CommandBuffer* last = gpu::begin_commands(last_pool);
             gpu::begin_render_pass(last, rendering, gpu::RenderingFlags::resuming);
-            gpu::write_timestamp(last, timestamp_gpu + 2);
+            gpu::write_timestamp(last, timestamp_cpu + 2);
             gpu::end_render_pass(last);
             gpu::end_commands(last);
 
             gpu::CommandBuffer* middle = gpu::begin_commands(middle_pool);
             gpu::begin_render_pass(middle, rendering, gpu::RenderingFlags::resuming | gpu::RenderingFlags::suspending);
-            gpu::write_timestamp(middle, timestamp_gpu + 1);
+            gpu::write_timestamp(middle, timestamp_cpu + 1);
             gpu::end_render_pass(middle);
             gpu::end_commands(middle);
             gpu::submit_and_present(device, {.commands = {second, commands, middle, last}, .completion = completion});
@@ -165,6 +163,9 @@ int main(int argc, char** argv)
             gpu::submit_and_present(device, {.commands = {second, commands}, .completion = completion});
         }
         gpu::wait_timeline(completion);
+        gpu::read_timestamps(present_pool);
+        gpu::read_timestamps(middle_pool);
+        gpu::read_timestamps(last_pool);
         CHECK(timestamp_cpu[0] != ~uint64{0});
         if (split_pass)
         {
@@ -182,7 +183,6 @@ int main(int argc, char** argv)
     gpu::destroy_command_pool(last_pool);
     gpu::destroy_command_pool(middle_pool);
     gpu::destroy_command_pool(present_pool);
-    gpu::destroy_gpu_heap(timestamps);
     gpu::destroy_timeline_semaphore(completion.semaphore);
     gpu::destroy_device(device);
     CHECK(DestroyWindow(window));

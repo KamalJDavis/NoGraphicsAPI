@@ -12,7 +12,12 @@ add_library(NoGraphicsAPIUtility_math INTERFACE)
 add_library(NoGraphicsAPIUtility::math ALIAS NoGraphicsAPIUtility_math)
 set_target_properties(NoGraphicsAPIUtility_math PROPERTIES EXPORT_NAME math)
 target_link_libraries(NoGraphicsAPIUtility_math INTERFACE NoGraphicsAPIUtility::types)
-if(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES ";" AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    target_compile_options(NoGraphicsAPIUtility_math INTERFACE "SHELL:-Xarch_x86_64 -mavx2" "SHELL:-Xarch_x86_64 -mfma")
+elseif(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR
+                 (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")))
+    # ARM64 guarantees NEON and fused multiply-add.
+elseif(MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
     target_compile_options(NoGraphicsAPIUtility_math INTERFACE /arch:AVX2)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(NoGraphicsAPIUtility_math INTERFACE -mavx2 -mfma)

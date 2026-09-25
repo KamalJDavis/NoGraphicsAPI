@@ -57,7 +57,8 @@ void destroy_gbuffer(TextureAllocator& texture_allocator, GBuffer& gbuffer) noex
     gbuffer = {};
 }
 
-void recreate_gbuffer(CommandBuffer* commands, Device* device, TextureAllocator& texture_allocator, GBuffer& gbuffer, byte* descriptors, uint64 descriptor_size,
+void recreate_gbuffer(CommandBuffer* commands, TextureAllocator& texture_allocator, GBuffer& gbuffer,
+                     TextureDescriptorHeap* descriptors, uint32 first_descriptor,
                      uint32 width, uint32 height) noexcept
 {
     gbuffer = {
@@ -83,10 +84,10 @@ void recreate_gbuffer(CommandBuffer* commands, Device* device, TextureAllocator&
     gbuffer.normal_roughness_render_view = create_render_view(gbuffer.normal_roughness.texture);
     gbuffer.depth_render_view = create_render_view(gbuffer.depth.texture);
 
-    write_texture_descriptor(device, descriptors + size_t(GBufferTexture::albedo) * descriptor_size, gbuffer.albedo.texture, TextureDescriptorType::sampled);
-    write_texture_descriptor(device, descriptors + size_t(GBufferTexture::normal_roughness) * descriptor_size, gbuffer.normal_roughness.texture,
+    write_texture_descriptor(descriptors, first_descriptor + uint32(GBufferTexture::albedo), gbuffer.albedo.texture, TextureDescriptorType::sampled);
+    write_texture_descriptor(descriptors, first_descriptor + uint32(GBufferTexture::normal_roughness), gbuffer.normal_roughness.texture,
                              TextureDescriptorType::sampled);
-    write_texture_descriptor(device, descriptors + size_t(GBufferTexture::depth) * descriptor_size, gbuffer.depth.texture, TextureDescriptorType::sampled);
+    write_texture_descriptor(descriptors, first_descriptor + uint32(GBufferTexture::depth), gbuffer.depth.texture, TextureDescriptorType::sampled);
 }
 
 float random_signed(uint32& state) noexcept
@@ -147,8 +148,11 @@ void initialize_object_data(ObjectData* objects) noexcept
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    uint64 frame_limit = 0;
+    if (!example_frame_limit(argc, argv, frame_limit)) return 1;
+    uint64 rendered_frames = 0;
     // Init
     void* window = open_example_window("NoGraphicsAPI deferred renderer", initial_width, initial_height);
     Device* device = create_device({.window = window, .swapchain_format = Format::bgra8_srgb}).device;
@@ -164,28 +168,32 @@ int main()
     printf("Using %s\n", caps.device_name);
 
     // Shaders
-    const Span<uint32> simulation_spirv = read_spirv(NOGRAPHICSAPI_SIMULATION_COMPUTE_SPV_PATH);
-    const Span<uint32> gbuffer_mesh_spirv = read_spirv(NOGRAPHICSAPI_GBUFFER_MESH_SPV_PATH);
-    const Span<uint32> gbuffer_fragment_spirv = read_spirv(NOGRAPHICSAPI_GBUFFER_FRAGMENT_SPV_PATH);
-    const Span<uint32> deferred_vertex_spirv = read_spirv(NOGRAPHICSAPI_DEFERRED_VERTEX_SPV_PATH);
-    const Span<uint32> deferred_fragment_spirv = read_spirv(NOGRAPHICSAPI_DEFERRED_FRAGMENT_SPV_PATH);
-    if (!simulation_spirv.data || !gbuffer_mesh_spirv.data || !gbuffer_fragment_spirv.data || !deferred_vertex_spirv.data || !deferred_fragment_spirv.data)
+    const Span<byte> simulation_code = read_shader(NOGRAPHICSAPI_SIMULATION_COMPUTE_SHADER_PATH);
+    const Span<byte> gbuffer_mesh_code = read_shader(NOGRAPHICSAPI_GBUFFER_MESH_SHADER_PATH);
+    const Span<byte> gbuffer_fragment_code = read_shader(NOGRAPHICSAPI_GBUFFER_FRAGMENT_SHADER_PATH);
+    const Span<byte> deferred_vertex_code = read_shader(NOGRAPHICSAPI_DEFERRED_VERTEX_SHADER_PATH);
+    const Span<byte> deferred_fragment_code = read_shader(NOGRAPHICSAPI_DEFERRED_FRAGMENT_SHADER_PATH);
+    if (!simulation_code.data || !gbuffer_mesh_code.data || !gbuffer_fragment_code.data || !deferred_vertex_code.data || !deferred_fragment_code.data)
     {
-        free(deferred_fragment_spirv.data);
-        free(deferred_vertex_spirv.data);
-        free(gbuffer_fragment_spirv.data);
-        free(gbuffer_mesh_spirv.data);
-        free(simulation_spirv.data);
+        free(deferred_fragment_code.data);
+        free(deferred_vertex_code.data);
+        free(gbuffer_fragment_code.data);
+        free(gbuffer_mesh_code.data);
+        free(simulation_code.data);
         destroy_device(device);
         close_example_window(window);
         return 1;
     }
-    PSO* simulation_pso = create_compute_pso(device, simulation_spirv);
-    free(simulation_spirv.data);
+    PSO* simulation_pso = create_compute_pso(device, {
+        .code = {simulation_code.data, simulation_code.size}, .entry_point = "computeMain",
+        .threadgroup_size = {.x = simulation_thread_count, .y = 1, .z = 1},
+    });
+    free(simulation_code.data);
 
     PSO* gbuffer_pso = create_mesh_pso(device, {
-        .mesh_spirv = gbuffer_mesh_spirv,
-        .fragment_spirv = gbuffer_fragment_spirv,
+        .mesh = {.code = {gbuffer_mesh_code.data, gbuffer_mesh_code.size}, .entry_point = "meshMain",
+            .threadgroup_size = {.x = gbuffer_thread_count, .y = 1, .z = 1}},
+        .fragment = {.code = {gbuffer_fragment_code.data, gbuffer_fragment_code.size}, .entry_point = "fragmentMain"},
         .color_targets = {
             {.format = Format::rgba8_unorm},
             {.format = Format::rgba16_float},
@@ -193,20 +201,29 @@ int main()
         .depth_format = Format::d32_float,
         .rasterization = { .cull = CullMode::clockwise },
     });
-    free(gbuffer_fragment_spirv.data);
-    free(gbuffer_mesh_spirv.data);
+    free(gbuffer_fragment_code.data);
+    free(gbuffer_mesh_code.data);
 
     PSO* deferred_lighting_pso = create_graphics_pso(device, {
-        .vertex_spirv = deferred_vertex_spirv,
-        .fragment_spirv = deferred_fragment_spirv,
+        .vertex = {.code = {deferred_vertex_code.data, deferred_vertex_code.size}, .entry_point = "vertexMain"},
+        .fragment = {.code = {deferred_fragment_code.data, deferred_fragment_code.size}, .entry_point = "fragmentMain"},
         .color_targets = {{.format = Format::bgra8_srgb}},
     });
-    free(deferred_fragment_spirv.data);
-    free(deferred_vertex_spirv.data);
+    free(deferred_fragment_code.data);
+    free(deferred_vertex_code.data);
+    if (!simulation_pso || !gbuffer_pso || !deferred_lighting_pso)
+    {
+        destroy_pso(deferred_lighting_pso);
+        destroy_pso(gbuffer_pso);
+        destroy_pso(simulation_pso);
+        destroy_device(device);
+        close_example_window(window);
+        return 1;
+    }
 
     // GPU resources
-    GpuHeap texture_descriptor_heap =
-        create_gpu_heap(device, caps.texture_descriptor_size * gbuffer_texture_count * frames_in_flight, MemoryType::texture_descriptor_heap);
+    TextureDescriptorHeap* texture_descriptor_heap =
+        create_texture_descriptor_heap(device, gbuffer_texture_count * frames_in_flight);
     GpuHeap data_heap = create_gpu_heap(device, data_heap_size);
     BumpAllocator data_allocator(data_heap.range);
     const GpuCpuRange<ObjectData> object_allocation = data_allocator.allocate<ObjectData>(object_count);
@@ -230,7 +247,7 @@ int main()
     DeleteQueue delete_queue(latest_completion.semaphore, frames_in_flight);
     CommandPool* command_pools[frames_in_flight] = {create_command_pool(device), create_command_pool(device)};
 
-    while (pump_example_window(window))
+    while ((!frame_limit || rendered_frames < frame_limit) && pump_example_window(window))
     {
         // Limit the application to two frames in flight so double-buffered descriptors are safe to reuse
         if (latest_completion.value >= frames_in_flight)
@@ -255,12 +272,11 @@ int main()
                 delete_queue.defer(latest_completion.value, [&texture_allocator, gbuffer]() mutable noexcept { destroy_gbuffer(texture_allocator, gbuffer); });
                 descriptor_row = (descriptor_row + 1) % frames_in_flight;
             }
-            recreate_gbuffer(commands, device, texture_allocator, gbuffer,
-                             texture_descriptor_heap.range.cpu + size_t(descriptor_row * gbuffer_texture_count) * caps.texture_descriptor_size,
-                             caps.texture_descriptor_size, extent.x, extent.y);
+            recreate_gbuffer(commands, texture_allocator, gbuffer,
+                             texture_descriptor_heap, descriptor_row * gbuffer_texture_count, extent.x, extent.y);
         }
 
-        set_texture_descriptor_heap(commands, gpu_range(texture_descriptor_heap));
+        set_texture_descriptor_heap(commands, texture_descriptor_heap);
 
         // Simulation
         const double current_time = example_time_seconds();
@@ -279,8 +295,12 @@ int main()
 
         // G-buffer
         barrier(commands,
-            Stage::compute | Stage::fragment | Stage::depth_stencil_tests, Access::shader_write | Access::shader_read | Access::depth_stencil_write,
-            Stage::mesh | Stage::color_output | Stage::depth_stencil_tests, Access::shader_read | Access::color_write | Access::depth_stencil_write);
+            Stage::compute, Access::shader_write,
+            Stage::mesh, Access::shader_read);
+        barrier(commands,
+            Stage::fragment | Stage::color_output | Stage::depth_stencil_tests,
+            Access::shader_read | Access::color_write | Access::depth_stencil_write,
+            Stage::color_output | Stage::depth_stencil_tests, Access::color_write | Access::depth_stencil_write);
 
         begin_render_pass(commands, {
             .colors = { {
@@ -357,6 +377,7 @@ int main()
         end_commands(commands);
         latest_completion.value++;
         submit_and_present(device, {.commands = {commands}, .completion = latest_completion});
+        ++rendered_frames;
     }
 
     wait_idle(device);
@@ -372,7 +393,7 @@ int main()
     destroy_gbuffer(texture_allocator, gbuffer);
     destroy_texture_heap(texture_heap);
     destroy_gpu_heap(data_heap);
-    destroy_gpu_heap(texture_descriptor_heap);
+    destroy_texture_descriptor_heap(texture_descriptor_heap);
 
     destroy_device(device);
     close_example_window(window);

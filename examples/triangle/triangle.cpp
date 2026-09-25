@@ -5,8 +5,11 @@
 
 using namespace gpu;
 
-int main()
+int main(int argc, char** argv)
 {
+    uint64 frame_limit = 0;
+    if (!example_frame_limit(argc, argv, frame_limit)) return 1;
+    uint64 rendered_frames = 0;
     constexpr uint32 width = 512;
     constexpr uint32 height = 512;
 
@@ -22,20 +25,34 @@ int main()
 
     printf("Using %s\n", get_device_caps(device).device_name);
 
-    const Span<uint32> vertex_spirv = read_spirv(NOGRAPHICSAPI_VERTEX_SPV_PATH);
-    const Span<uint32> fragment_spirv = read_spirv(NOGRAPHICSAPI_FRAGMENT_SPV_PATH);
+    const Span<byte> vertex_code = read_shader(NOGRAPHICSAPI_VERTEX_SHADER_PATH);
+    const Span<byte> fragment_code = read_shader(NOGRAPHICSAPI_FRAGMENT_SHADER_PATH);
+    if (!vertex_code.data || !fragment_code.data)
+    {
+        free(fragment_code.data);
+        free(vertex_code.data);
+        destroy_device(device);
+        close_example_window(window);
+        return 1;
+    }
     PSO* triangle_pso = create_graphics_pso(device, {
-        .vertex_spirv = vertex_spirv,
-        .fragment_spirv = fragment_spirv,
+        .vertex = {.code = {vertex_code.data, vertex_code.size}, .entry_point = "vertexMain"},
+        .fragment = {.code = {fragment_code.data, fragment_code.size}, .entry_point = "fragmentMain"},
         .color_targets = { { .format = Format::bgra8_srgb } }
     });
-    free(fragment_spirv.data);
-    free(vertex_spirv.data);
+    free(fragment_code.data);
+    free(vertex_code.data);
+    if (!triangle_pso)
+    {
+        destroy_device(device);
+        close_example_window(window);
+        return 1;
+    }
 
     TimelinePoint latest_completion{ .semaphore = create_timeline_semaphore(device) };
     CommandPool* command_pools[] = {create_command_pool(device), create_command_pool(device)};
 
-    while (pump_example_window(window))
+    while ((!frame_limit || rendered_frames < frame_limit) && pump_example_window(window))
     {
         if (latest_completion.value >= 2)
             wait_timeline({.semaphore = latest_completion.semaphore, .value = latest_completion.value - 1});
@@ -54,6 +71,7 @@ int main()
         end_commands(commands);
         latest_completion.value++;
         submit_and_present(device, {.commands = {commands}, .completion = latest_completion});
+        ++rendered_frames;
     }
 
     wait_idle(device);

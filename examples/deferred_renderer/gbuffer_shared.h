@@ -10,3 +10,4 @@ struct GBufferRoot
 };
 
 static const uint32 object_grid_width = 512;
+static const uint32 gbuffer_thread_count = 32;

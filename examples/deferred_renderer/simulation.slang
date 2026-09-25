@@ -1,6 +1,7 @@
+#include <NoGraphicsAPI/shader.slang>
 #include "simulation_shared.h"
 
-[[vk::push_constant]] ConstantBuffer<SimulationRoot> root;
+GPU_ROOT(SimulationRoot, root);
 
 [shader("compute")]
 [numthreads(simulation_thread_count, 1, 1)]
