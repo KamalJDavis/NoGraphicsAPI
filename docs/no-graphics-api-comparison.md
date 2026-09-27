@@ -104,8 +104,7 @@ Vulkan requires `VK_EXT_descriptor_heap`, `VK_KHR_shader_untyped_pointers`,
 [Vulkan support](vulkan-support.md). Descriptor-heap pipelines use no `VkDescriptorSetLayout`,
 `VkDescriptorPool`, `VkDescriptorSet` or `VkPipelineLayout`.
 
-The Metal baseline, bounded address registry, shader handle representation and native/tool
-limitations are documented in [Metal support](metal-support.md). Neither backend exposes every
+The Metal mapping and hardware limits are documented in [Metal support](metal-support.md). Neither backend exposes every
 possible native operation. GPU-generated command roots would need an additional interface, such as
 Vulkan device-generated commands; they do not follow implicitly from address-based indirect arguments.
 

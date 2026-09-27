@@ -4,12 +4,12 @@ See the README for [Windows](../README.md#windows-installation-and-quick-start),
 [macOS](../README.md#macos-installation-and-quick-start), and [hardware requirements](../README.md#hardware-requirements).
 CMake selects native Metal 4 on Apple platforms and Vulkan elsewhere.
 
-| Target | Compiler and presentation |
+| Target | Toolchain |
 | --- | --- |
-| Windows x86-64 | MSVC or clang-cl; Win32 windows. |
+| Windows x86-64 | MSVC or clang-cl. |
 | Linux x86-64 | GCC or Clang; headless library and tests. |
-| macOS 26+ ARM64 | Xcode 26+ with the Metal compiler; AppKit examples and `CAMetalLayer`. |
-| iOS/iPadOS 26+ ARM64 | Xcode cross-compilation; the application supplies UIKit and `CAMetalLayer`. |
+| macOS 26+ ARM64 | Xcode 26+ with the Metal compiler. |
+| iOS/iPadOS 26+ ARM64 | Xcode 26+ with the device SDK. |
 
 MinGW, 32-bit targets, and non-Apple ARM targets are unsupported. Apple hardware requirements are listed separately from CPU build architectures.
 
@@ -39,8 +39,8 @@ cmake -S . -B build-ios -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iph
 cmake --build build-ios --config Release
 ```
 
-Applications supply code signing, bundle resources, and lifecycle handling. Compile metallibs for the target SDK;
-macOS metallibs cannot be shipped as iOS shaders. See [Slang compilation](slang.md).
+Compile metallibs for the target SDK; macOS libraries cannot be used on iOS. See [Slang compilation](slang.md).
+For presentation, supply an application-owned `CAMetalLayer*` as `DeviceDesc::window`.
 
 ## Using the library
 

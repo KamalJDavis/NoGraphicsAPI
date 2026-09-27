@@ -18,10 +18,8 @@ SamplerState sampler = gpu_sampler(root.sampler_index);
 ```
 
 Use `gpu_sampler<SamplerComparisonState>(index)` for comparison samplers. Texture types must match
-the view written to the indexed descriptor heap. The heap helpers inline; Metal texture selection
-is one addition to the texture-view-pool base ID followed by a handle reinterpretation, with no
-resource-ID lookup table. Vulkan retains native `SPV_EXT_descriptor_heap` lowering and its default
-nonuniform resource access. Existing explicit annotations can use `gpu_nonuniform_index(index)`.
+the indexed view. Helpers inline on both backends; `gpu_nonuniform_index(index)` preserves explicit
+nonuniform annotations. See [Metal implementation](metal-support.md) for texture-pool indexing.
 
 ## Root and pointer layout
 
@@ -37,10 +35,8 @@ their normal submission lifetime.
 | Vulkan | Push data / push constants | Native resource descriptor heap | Native sampler descriptor heap |
 | Metal | Exact root bytes at buffer 0 | One 64-bit pool base at buffer 1 | Typed sampler entries at buffer 2 |
 
-Metal's ordinary `ConstantBuffer<Type>` uses Metal vector/matrix alignment and can disagree with
-the shared C++ layout. The macro instead binds packed root storage and snapshots it into shader
-locals; unused fields and stages are eliminated. GPU pointer data uses Slang's packed native-pointer
-layout. No backend fields are added to the user root.
+`GPU_ROOT` preserves the shared C++ layout, including vectors, matrices and pointers, without adding
+backend fields. Plain Metal `ConstantBuffer<Type>` can use different alignment.
 
 `GPU_ADDRESS(value)` forms an address for shared code such as
 `loadAligned<16>(GPU_ADDRESS(root.camera->position))`. It preserves Vulkan's explicit load/store
@@ -82,11 +78,6 @@ precompiled metallib; Vulkan accepts SPIR-V. Debug builds assert the expected ar
 On Metal, compute, task and mesh `threadgroup_size` must match `numthreads`; use the same shared
 constant at shader and PSO call sites. Vulkan reads the dimensions from SPIR-V. Shader compilation
 belongs to the build system; the API performs no runtime SPIR-V translation. The library has no built-in shader programs; `shader.slang` supplies helpers for application shaders.
-
-The `test_shader_abi` GPU test checks packed roots, matrices, pointer stores, divergent texture-pool
-indices, and sampler indices 4092–4095. The task test exercises shared task/mesh shaders.
-Metal texture-handle construction is isolated in the common header; see
-[the Metal implementation](metal-support.md#root-abi-and-shared-shaders) for its representation.
 
 ## References
 

@@ -32,18 +32,13 @@ See the [standalone repro and test results](repro-queue-device-lost.md).
 
 ## Metal 4 / macOS 26.6.2: render timestamps leave counter entries unwritten
 
-Observed on Apple M3 Max with macOS 26.6.2 and Xcode 27. Ten native render-encoder timestamp writes
-interleaved with draws return five nonzero entries and five zeros after GPU completion. The failure
-reproduces with and without Metal API validation, without a preceding validation error.
+On Apple M3 Max with macOS 26.6.2 and Xcode 27, ten native render timestamp writes interleaved with
+draws return five nonzero entries and five zeros after GPU completion. A standalone native Metal repro
+fails with and without API validation, using one ordinary render pass and no Slang or NoGraphicsAPI calls.
 
-The standalone repro does not link or call NoGraphicsAPI and uses inline MSL, without Slang. It uses
-one ordinary render pass, so suspended/resumed rendering is not required. Counter retrieval follows
-Apple's documented shared-event completion sequence.
-
-This points to an Apple Metal driver/runtime issue; the root cause is not vendor-confirmed. There is
-no established workaround for timestamps inside rendering. Outside-render command-buffer timestamps
-work in the tested configuration and are used by bad_sdf. The library does not substitute timings or
-hide the failing `test_render_continuation`. See the [standalone repro and test results](repro-metal-render-timestamps.md).
+This points to a Metal driver/runtime issue; the root cause is not vendor-confirmed. Outside-render
+markers work in the tested configuration, but no workaround for in-render markers is established.
+`test_render_continuation` retains the failing check. See the [repro and results](repro-metal-render-timestamps.md).
 
 ## MetalTools validation limitations
 

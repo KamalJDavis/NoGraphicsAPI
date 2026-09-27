@@ -71,72 +71,33 @@ and shares them across graphics stages, rather than passing separate GPU root po
 See the [design comparison](docs/no-graphics-api-comparison.md) for the remaining differences and
 the [shader guide](docs/slang.md) for complete examples.
 
-## Descriptor heaps
+## Native implementations
 
-Descriptor heaps expose application-owned slots through opaque texture and sampler heap types:
-
-```cpp
-gpu::TextureDescriptorHeap* textures = gpu::create_texture_descriptor_heap(device, 4096);
-gpu::SamplerDescriptorHeap* samplers = gpu::create_sampler_descriptor_heap(device, 64);
-gpu::write_texture_descriptor(textures, 17, texture, gpu::TextureDescriptorType::sampled);
-gpu::write_sampler_descriptor(samplers, 3, {.address_u = gpu::AddressMode::clamp_to_edge});
-gpu::set_texture_descriptor_heap(commands, textures);
-gpu::set_sampler_descriptor_heap(commands, samplers);
-```
-
-The shared shader uses `gpu_texture<Texture2D<float4>>(17)` and `gpu_sampler(3)` from
-`<NoGraphicsAPI/shader.slang>`. Indexed copy functions support overlapping slot ranges. Modify or
-reuse a slot only after its previous GPU users have completed; destroy heaps after their final use.
-
-Vulkan descriptor storage remains CPU-mapped coherent GPU memory internally. Metal texture descriptors
-live in an `MTLTextureViewPool`, whose descriptor bytes are not exposed by Metal. Its shader selects
-`baseResourceID + index` directly, without an ID lookup table. Sampler heaps use a mapped array of
-64-bit resource IDs. The common API exposes indices and write/copy operations rather than a fake
-mapped texture-descriptor buffer. Ordinary `GpuHeap::range.cpu` and `range.gpu` remain public.
-See [the Metal data model](docs/metal-support.md#application-owned-descriptor-heaps).
-
-## Threading
-
-The application must externally synchronize each queue and command pool. Use one command pool per
-in-flight frame per recording thread. Independent pools can record concurrently, and work can be
-submitted to multiple GPU queues.
-
-Metal supports up to 64 live `GpuHeap` allocations. GPU-address lookups read an atomic snapshot without
-mutexes or atomic read-modify-write operations. Native residency mutations are serialized internally;
-address-index updates and timestamp-slot allocation use atomics. Disjoint descriptor writes/copies and ordinary queue submission take no
-internal mutex. Copy sources must remain stable. GPU shader validation also serializes MetalTools'
-residency enumeration. See [concurrency validation](docs/metal-validation.md#concurrency-and-lifetime).
-
-The utility library's `BumpAllocator::allocate_atomic()` supports concurrent bump allocation using relaxed atomic operations.
+Metal 4 supplies native GPU addresses, draw/dispatch commands that accept those addresses, and
+`MTLTextureViewPool` for indexed textures. Vulkan supplies the equivalent model through device-address
+commands and descriptor heaps. See [Metal implementation](docs/metal-support.md) and
+[Vulkan implementation](docs/vulkan-support.md) for how these map to NoGraphicsAPI.
 
 ## Hardware requirements
 
 ### Metal 4
 
-The Metal backend supports macOS 26+, iOS 26+, and iPadOS 26+ on Apple GPU family 7 or newer with Metal 4.
-Native Apple builds use ARM64 and NEON utility math. Device creation checks both GPU families.
+Requires macOS, iOS or iPadOS 26+ and Apple GPU family 7 or newer with Metal 4.
 
 | Platform | Supported devices |
 | --- | --- |
-| Mac | Apple silicon Macs, including M1 and M2 and later M-series chips |
-| iPhone | A14 Bionic or newer, including iPhone 12 and later |
-| iPad Pro | Models introduced in 2021 or later (M1 and newer) |
-| iPad Air | Models introduced in 2020 or later (A14 and newer) |
-| iPad mini | Models introduced in 2021 or later (A15 and newer) |
-| iPad | Models introduced in 2022 or later (A14 and newer) |
+| Mac | Apple silicon Macs (M1 and newer) |
+| iPhone | iPhone 12 and newer (A14 and newer) |
+| iPad Pro | 2021 and newer (M1 and newer) |
+| iPad Air | 2020 and newer (A14 and newer) |
+| iPad mini | 2021 and newer (A15 and newer) |
+| iPad | 2022 and newer (A14 and newer) |
 
-See [Apple's Metal 4 device list](https://support.apple.com/en-us/102894) and
-[GPU family tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf).
-Intel Macs and older Apple GPUs are outside this baseline. tvOS, visionOS, and Simulator builds are not supported targets.
-
-Direct task/mesh draws work throughout the baseline. Native indirect mesh draws require Apple9 or newer
-(A17 Pro / M3 or newer), exposed by `DeviceCaps::indirect_mesh_draw`. M1/M2 applications can use direct task draws
-whose shaders select mesh work from GPU data. BC texture compression is a separate capability; query it before choosing BC assets.
-Applications can impose stricter hardware and memory requirements than the library.
-
-Metal builds require Xcode 26+ and its Metal compiler. Shared Metal shaders require stock Slang 2026.18.2+.
-The backend is exercised on M3 Max and iPhone 15 Pro; see [Metal implementation](docs/metal-support.md) and
-[validation coverage and driver limitations](docs/metal-validation.md). Support for the wider baseline does not imply every model has been hardware-tested.
+See [Apple's supported devices](https://support.apple.com/en-us/102894).
+Direct task/mesh draws work throughout this baseline; indirect mesh draws require A17 Pro / M3 or newer.
+BC texture compression is a separate capability. See [Metal implementation](docs/metal-support.md)
+for these limits and [validation](docs/metal-validation.md) for tested hardware and known issues.
+Intel Macs, Simulator, tvOS and visionOS are not supported targets.
 
 ### Vulkan 1.4
 
@@ -199,16 +160,8 @@ ctest --test-dir build --output-on-failure
 build/examples/triangle/example_triangle
 ```
 
-Examples use native AppKit windows with `CAMetalLayer`. The shader helper emits precompiled Metal
-libraries on macOS and validated SPIR-V on Vulkan. See [validation limitations](docs/metal-validation.md)
-for the known render-timestamp test failure and MetalTools diagnostics. `ShaderStage` supplies bytes, an entry point,
-and compiled workgroup dimensions; see [the shared shader ABI](docs/slang.md).
-
-The library and utilities also cross-compile for iOS 26 ARM64 with `CMAKE_SYSTEM_NAME=iOS`,
-`CMAKE_OSX_SYSROOT=iphoneos`, and `CMAKE_OSX_ARCHITECTURES=arm64`. Keep examples and tests disabled;
-their window adapters and test runners target the desktop. iOS applications supply their UIKit lifecycle
-and `CAMetalLayer`, and compile metallibs for the `iphoneos` SDK. The backend executes in bad_sdf on
-iPhone 15 Pro; M1/M2 iPad hardware remains unverified.
+See [building and integration](docs/building.md) for iOS builds and
+[Metal validation](docs/metal-validation.md) for known test limitations.
 
 ## Windows installation and quick start
 
