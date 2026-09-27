@@ -1,8 +1,17 @@
 # Building and integration
 
-See the README for [Windows installation](../README.md#windows-installation-and-quick-start) and
-[hardware requirements](../README.md#hardware-requirements). Windows supports MSVC and clang-cl;
-GNU and Clang can build the headless library on other platforms. MinGW, 32-bit x86, and ARM are not supported.
+See the README for [Windows](../README.md#windows-installation-and-quick-start),
+[macOS](../README.md#macos-installation-and-quick-start), and [hardware requirements](../README.md#hardware-requirements).
+CMake selects native Metal 4 on Apple platforms and Vulkan elsewhere.
+
+| Target | Compiler and presentation |
+| --- | --- |
+| Windows x86-64 | MSVC or clang-cl; Win32 windows. |
+| Linux x86-64 | GCC or Clang; headless library and tests. |
+| macOS 26+ ARM64 | Xcode 26+ with the Metal compiler; AppKit examples and `CAMetalLayer`. |
+| iOS/iPadOS 26+ ARM64 | Xcode cross-compilation; the application supplies UIKit and `CAMetalLayer`. |
+
+MinGW, 32-bit targets, and non-Apple ARM targets are unsupported. Apple hardware requirements are listed separately from CPU build architectures.
 
 ## Library build
 
@@ -17,7 +26,21 @@ cmake --install build --config Release --prefix path/to/install
 
 For examples and tests, configure with `-DNOGRAPHICSAPI_BUILD_EXAMPLES=ON` and
 `-DNOGRAPHICSAPI_BUILD_TESTS=ON`, then run `ctest --test-dir build -C Release --output-on-failure`.
-Debug builds enable Vulkan validation when installed.
+Debug Vulkan builds enable validation when installed. Metal validation is opt-in through Xcode or
+`MTL_DEBUG_LAYER=1`; see [Metal validation](metal-validation.md) for supported instrumentation and known driver issues.
+Apple example/test shader builds require stock Slang 2026.18.2+ and Xcode's Metal compiler. Vulkan shader builds require
+Slang 2026.14.1+ and SPIRV-Tools 2026.3+. Shader tools are not required for a library-only build.
+
+For iOS, disable desktop examples and tests and select the device SDK:
+
+```sh
+cmake -S . -B build-ios -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
+cmake --build build-ios --config Release
+```
+
+Applications supply code signing, bundle resources, and lifecycle handling. Compile metallibs for the target SDK;
+macOS metallibs cannot be shipped as iOS shaders. See [Slang compilation](slang.md).
 
 ## Using the library
 

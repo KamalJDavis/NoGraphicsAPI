@@ -22,15 +22,21 @@ int main()
 
     printf("Using %s\n", get_device_caps(device).device_name);
 
-    const Span<uint32> vertex_spirv = read_spirv(NOGRAPHICSAPI_VERTEX_SPV_PATH);
-    const Span<uint32> fragment_spirv = read_spirv(NOGRAPHICSAPI_FRAGMENT_SPV_PATH);
+    const Span<byte> vertex_code = read_shader(NOGRAPHICSAPI_VERTEX_SHADER_PATH);
+    const Span<byte> fragment_code = read_shader(NOGRAPHICSAPI_FRAGMENT_SHADER_PATH);
     PSO* triangle_pso = create_graphics_pso(device, {
-        .vertex_spirv = vertex_spirv,
-        .fragment_spirv = fragment_spirv,
+        .vertex = {.code = {vertex_code.data, vertex_code.size}, .entry_point = "vertexMain"},
+        .fragment = {.code = {fragment_code.data, fragment_code.size}, .entry_point = "fragmentMain"},
         .color_targets = { { .format = Format::bgra8_srgb } }
     });
-    free(fragment_spirv.data);
-    free(vertex_spirv.data);
+    free(fragment_code.data);
+    free(vertex_code.data);
+    if (!triangle_pso)
+    {
+        destroy_device(device);
+        close_example_window(window);
+        return 1;
+    }
 
     TimelinePoint latest_completion{ .semaphore = create_timeline_semaphore(device) };
     CommandPool* command_pools[] = {create_command_pool(device), create_command_pool(device)};

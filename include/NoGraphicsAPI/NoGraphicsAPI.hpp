@@ -27,6 +27,8 @@ struct CommandBuffer;
 struct TimelineSemaphore;
 struct GpuHeapOwner;
 struct TextureHeapOwner;
+struct TextureDescriptorHeap;
+struct SamplerDescriptorHeap;
 
 enum class Error : uint8
 {
@@ -41,8 +43,6 @@ enum class MemoryType : uint8
     cpu_visible,
     gpu_only,
     readback,
-    texture_descriptor_heap,
-    sampler_descriptor_heap,
 };
 
 struct SizeAlign
@@ -438,22 +438,22 @@ struct DeviceCaps
     uint64 max_push_data_size = 0;
     // Common element size for suballocating TextureHeap storage; every SizeAlign::align divides this value.
     uint64 texture_heap_alignment = 0;
-    uint64 texture_descriptor_size = 0; // Bytes per descriptor slot.
-    uint64 sampler_descriptor_size = 0; // Bytes per descriptor slot.
     float timestamp_period_ns = 0.0f; // Nanoseconds per timestamp tick.
     uint32 sub_texel_precision_bits = 0; // Fractional filtering precision, for conservative sampled-field bounds.
     bool texture_compression_bc = false;
     bool texture_compression_astc = false;
     bool storage_input_output16 = false;
+    bool indirect_mesh_draw = false;
 };
 
-// Windowed device creation/destruction, drawable queries, acquire, and presentation stay on the window's message-pump thread.
-// The window must outlive the device. Other calls follow the object-level threading contract below.
+// Win32 windowed device creation/destruction, drawable queries, acquire, and presentation stay on the window's message-pump thread.
+// Metal calls may use a render thread; synchronize CAMetalLayer access with native UI/layer changes.
+// The window/layer must outlive the device. Other calls follow the object-level threading contract below.
 struct DeviceDesc
 {
-    void* window = nullptr;
+    void* window = nullptr; // HWND on Windows; CAMetalLayer* on macOS/iOS. Null creates a headless device.
     Format swapchain_format = Format::undefined;
-    uint32 desired_swapchain_image_count = 2; // 1..8 presentation contexts.
+    uint32 desired_swapchain_image_count = 2; // Vulkan: 1..8 presentation contexts. Metal clamps to 2..3 drawables.
     // Counts are capped to each family's capacity. A nonzero request requires that kind of queue to be available.
     uint32 desired_queue_count = 1; // General graphics + compute queues; must be nonzero.
     uint32 desired_compute_queue_count = 0;
@@ -592,10 +592,19 @@ struct DepthStencilState
     StencilFaceState back = {};
 };
 
+struct ShaderStage
+{
+    // Precompiled SPIR-V on Vulkan (4-byte-aligned words), metallib on Metal. Empty omits an optional stage.
+    ByteSpan code = {};
+    const char* entry_point = "main";
+    // Metal compute/task/mesh dimensions must match the compiled numthreads. Vulkan uses the SPIR-V metadata.
+    uint32x3 threadgroup_size = {.x = 1, .y = 1, .z = 1};
+};
+
 struct GraphicsPSODesc
 {
-    Span<const uint32> vertex_spirv = {};
-    Span<const uint32> fragment_spirv = {}; // Empty omits the fragment stage, for depth-only rasterization.
+    ShaderStage vertex = {};
+    ShaderStage fragment = {}; // Empty omits the fragment stage, for depth-only rasterization.
     Span<const ColorTargetDesc> color_targets = {};
     Format depth_format = Format::undefined;
     Format stencil_format = Format::undefined;
@@ -604,9 +613,9 @@ struct GraphicsPSODesc
 
 struct MeshPSODesc
 {
-    Span<const uint32> task_spirv = {}; // Empty launches mesh workgroups directly; otherwise draws launch taskMain workgroups.
-    Span<const uint32> mesh_spirv = {};
-    Span<const uint32> fragment_spirv = {}; // Empty omits the fragment stage, for depth-only rasterization.
+    ShaderStage task = {}; // Empty launches mesh workgroups directly; otherwise draws launch task workgroups.
+    ShaderStage mesh = {};
+    ShaderStage fragment = {}; // Empty omits the fragment stage, for depth-only rasterization.
     Span<const ColorTargetDesc> color_targets = {};
     Format depth_format = Format::undefined;
     Format stencil_format = Format::undefined;
@@ -669,7 +678,8 @@ constexpr RenderingFlags operator|(RenderingFlags lhs, RenderingFlags rhs) noexc
 // The optional NoGraphicsAPIUtility DeleteQueue can defer destruction until a submitted frame completes.
 // Wait for all submitted frames to drain before destroying the device.
 // Distinct resource creation/destruction, immutable queries, and timeline waits may run concurrently on one device.
-// Resource lifetime changes must be synchronized with every CPU/GPU use of that resource. Descriptor writes require disjoint destinations.
+// Resource lifetime changes must be synchronized with every CPU/GPU use of that resource.
+// Concurrent descriptor updates require disjoint destinations, and copy source slots must not be modified by another update.
 // Each (device, queue_index) and command pool (including recording its buffers) is externally synchronized; different queues/pools may run concurrently.
 // Device idle/destruction requires exclusive access. Destroy command pools before their device. There are no internal queue or pool locks.
 [[nodiscard]] DeviceInit create_device(const DeviceDesc& desc = {}) noexcept;
@@ -690,8 +700,7 @@ void wait_idle(Device* device) noexcept;
 [[nodiscard]] SwapchainFrame acquire(CommandBuffer* commands) noexcept;
 void submit_and_present(Device* device, const SubmitDesc& desc) noexcept;
 
-// Every non-null returned pointer is 16-byte aligned. Descriptor heaps are exact allocations;
-// cpu_visible, gpu_only, and readback heaps are raw blocks for application-side suballocation.
+// Every non-null returned pointer is 16-byte aligned. GPU heaps are raw blocks for application-side suballocation.
 [[nodiscard]] GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory = MemoryType::cpu_visible) noexcept;
 void destroy_gpu_heap(const GpuHeap& heap) noexcept;
 
@@ -717,13 +726,23 @@ void destroy_texture_heap(const TextureHeap& heap) noexcept;
 void destroy_texture(Texture* texture) noexcept;
 [[nodiscard]] RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc = {}) noexcept;
 void destroy_render_view(RenderView* render_view) noexcept;
-void write_texture_descriptor(Device* device, void* cpu_destination, const Texture* texture, TextureDescriptorType type,
+// Descriptor slots form application-owned namespaces. Writes and copies require indices within capacity;
+// do not modify slots until all commands using their previous contents have completed. Copies may overlap.
+[[nodiscard]] TextureDescriptorHeap* create_texture_descriptor_heap(Device* device, uint32 capacity) noexcept;
+void destroy_texture_descriptor_heap(TextureDescriptorHeap* heap) noexcept;
+void write_texture_descriptor(TextureDescriptorHeap* heap, uint32 index, const Texture* texture, TextureDescriptorType type,
                               const TextureDescriptorDesc& desc = {}) noexcept;
-void write_sampler_descriptor(Device* device, void* cpu_destination, const SamplerDesc& desc = {}) noexcept;
+void copy_texture_descriptors(const TextureDescriptorHeap* source, uint32 source_index, TextureDescriptorHeap* destination,
+                              uint32 destination_index, uint32 count) noexcept;
+[[nodiscard]] SamplerDescriptorHeap* create_sampler_descriptor_heap(Device* device, uint32 capacity) noexcept;
+void destroy_sampler_descriptor_heap(SamplerDescriptorHeap* heap) noexcept;
+void write_sampler_descriptor(SamplerDescriptorHeap* heap, uint32 index, const SamplerDesc& desc = {}) noexcept;
+void copy_sampler_descriptors(const SamplerDescriptorHeap* source, uint32 source_index, SamplerDescriptorHeap* destination,
+                              uint32 destination_index, uint32 count) noexcept;
 
 [[nodiscard]] PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept;
 [[nodiscard]] PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept;
-[[nodiscard]] PSO* create_compute_pso(Device* device, Span<const uint32> compute_spirv) noexcept;
+[[nodiscard]] PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept;
 void destroy_pso(PSO* pso) noexcept;
 
 // Pools retain command storage until destruction. Reset only after every submitted buffer from this pool completes; unsubmitted buffers are discarded.
@@ -738,8 +757,8 @@ void end_commands(CommandBuffer* commands) noexcept;
 // queue_index must be less than DeviceCaps::queue_count; omitted selects queue zero.
 void submit(Device* device, const SubmitDesc& desc, uint32 queue_index = 0) noexcept;
 
-void set_texture_descriptor_heap(CommandBuffer* commands, GpuRange heap) noexcept; // Heap range must be full GpuHeap range
-void set_sampler_descriptor_heap(CommandBuffer* commands, GpuRange heap) noexcept; // Heap range must be full GpuHeap range
+void set_texture_descriptor_heap(CommandBuffer* commands, TextureDescriptorHeap* heap) noexcept;
+void set_sampler_descriptor_heap(CommandBuffer* commands, SamplerDescriptorHeap* heap) noexcept;
 
 void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination) noexcept;
 // Depth/stencil copies require a general queue. Copy-only queues also require DeviceCaps::copy_texture_granularity alignment.
@@ -750,9 +769,11 @@ void barrier(CommandBuffer* commands, Stage before, Access before_access, Stage 
 
 // Up to DeviceDesc::timestamp_query_count markers per command buffer. stage must map to a single GPU pipeline stage.
 // Ignored, leaving the destination unchanged, when timestamps are disabled or the queue lacks profiling support.
-// Destinations must be 8-byte aligned and distinct until submission completes.
-// Results are available after submission completes; only then read mapped readback memory.
-void write_timestamp(CommandBuffer* commands, uint64* gpu_destination, Stage stage = Stage::all_commands) noexcept;
+// Destinations are ordinary CPU memory and must remain valid and distinct until read_timestamps retrieves the results.
+void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage stage = Stage::all_commands) noexcept;
+// Retrieve unread timestamps from submitted buffers after every submission from this pool completes. Does not wait.
+// Call before resetting the pool; reset discards unread results. Unsubmitted buffers are ignored.
+void read_timestamps(CommandPool* pool) noexcept;
 
 // Each segment needs matching attachments, load/store operations, and clear values, and its own begin/end_render_pass pair.
 // Submit the complete suspend/resume chain in order in one batch. No action or synchronization commands may occur between segments.
@@ -777,6 +798,7 @@ void draw_indexed_indirect(CommandBuffer* commands, ByteSpan root, GpuRange indi
 void dispatch(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noexcept;
 void dispatch_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments) noexcept;
 void draw_meshlets(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noexcept;
+// Requires DeviceCaps::indirect_mesh_draw. Direct task/mesh draws remain available on every supported device.
 void draw_meshlets_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, uint32 draw_count = 1, uint32 stride = 0) noexcept;
 
 } // namespace gpu

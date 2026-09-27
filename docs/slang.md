@@ -1,161 +1,95 @@
-# Slang shader contract
+# Shared Slang shader contract
 
-`NoGraphicsAPI` uses Slang to express the shader contract behind the
-[*No Graphics API*](https://www.sebastianaaltonen.com/blog/no-graphics-api) model:
+NoGraphicsAPI shaders share C-compatible root structures, real 64-bit GPU pointers, and separate
+texture/sampler index namespaces across Vulkan and Metal 4. Include
+`<NoGraphicsAPI/shader.slang>` for the target ABI and
+`<NoGraphicsAPIUtility/shader_types.h>` in CPU/GPU shared data headers.
 
-- a small shared root structure for each draw or dispatch;
-- typed 64-bit GPU pointers for buffers and larger data structures;
-- integer indices into application-owned texture and sampler heaps; and
-- C-compatible layout for every POD structure shared by C++ and Slang, selected with
-  `-fvk-use-c-layout`.
+```slang
+#include <NoGraphicsAPI/shader.slang>
+#include "example_shared.h"
 
-The Vulkan backend has no application-visible descriptor sets, descriptor pools, buffer bindings,
-or pipeline layouts.
+GPU_ROOT(ExampleRoot, root);
 
-## Toolchain and compilation
+// Ordinary data remains pointer-based; only textures and samplers occupy heap slots.
+Vertex vertex = root.vertices[vertex_index];
+Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
+SamplerState sampler = gpu_sampler(root.sampler_index);
+```
 
-The examples require Slang 2026.14.1 or newer and SPIRV-Tools 2026.3 or newer. Slang 2026.14.1 is
-the first supported release with the descriptor-heap lowering fixes needed by this project. Every
-generated module is passed through `spirv-val` during the build.
+Use `gpu_sampler<SamplerComparisonState>(index)` for comparison samplers. Texture types must match
+the view written to the indexed descriptor heap. The heap helpers inline; Metal texture selection
+is one addition to the texture-view-pool base ID followed by a handle reinterpretation, with no
+resource-ID lookup table. Vulkan retains native `SPV_EXT_descriptor_heap` lowering and its default
+nonuniform resource access. Existing explicit annotations can use `gpu_nonuniform_index(index)`.
 
-The common Slang options are:
+## Root and pointer layout
+
+Define each root once in the shader's matching shared header. Pass those exact bytes to each draw
+or dispatch; roots fit 256 bytes, and larger data stays behind GPU pointers. Rootless stages need no
+root declaration. The CPU root can be stack-local; referenced resources and mutable data retain
+their normal submission lifetime.
+
+`GPU_ROOT(Type, name)` selects these bindings:
+
+| Target | Root | Texture namespace | Sampler namespace |
+| --- | --- | --- | --- |
+| Vulkan | Push data / push constants | Native resource descriptor heap | Native sampler descriptor heap |
+| Metal | Exact root bytes at buffer 0 | One 64-bit pool base at buffer 1 | Typed sampler entries at buffer 2 |
+
+Metal's ordinary `ConstantBuffer<Type>` uses Metal vector/matrix alignment and can disagree with
+the shared C++ layout. The macro instead binds packed root storage and snapshots it into shader
+locals; unused fields and stages are eliminated. GPU pointer data uses Slang's packed native-pointer
+layout. No backend fields are added to the user root.
+
+`GPU_ADDRESS(value)` forms an address for shared code such as
+`loadAligned<16>(GPU_ADDRESS(root.camera->position))`. It preserves Vulkan's explicit load/store
+alignment and selects Slang's internal address operation on Metal. Integer address round-trips are
+unnecessary. Use shared integer fields for booleans and retain CPU size/offset checks.
+
+Write vertex and mesh `SV_Position` outputs directly. The Metal backend maps each viewport
+`(x, y, width, height)` to `(x, y + height, width, -height)`, preserving Vulkan's screen coordinates.
+This applies to default and explicit viewports; shaders need no Y-flip helper or compiler option.
+`gpu_wave_prefix_count_bits` covers `WavePrefixCountBits`, whose Metal definition is absent.
+
+## Build and stage artifacts
+
+Vulkan requires Slang 2026.14.1+ and SPIRV-Tools 2026.3+. Metal is verified with stock Slang 2026.18.2,
+Xcode's Metal 4 compiler, and macOS/iOS 26+. No Slang fork or generated-source rewriting is required.
+Both targets use `-matrix-layout-row-major`; Vulkan additionally requires `-fvk-use-c-layout`.
 
 ```sh
-slangc shader.slang \
-  -target spirv \
-  -profile spirv_1_5 \
-  -emit-spirv-directly \
-  -fvk-use-entrypoint-name \
-  -fvk-use-c-layout \
-  -matrix-layout-row-major \
-  -capability spvDescriptorHeapEXT \
-  -entry fragmentMain \
-  -stage fragment \
-  -o shader.frag.spv
+slangc shader.slang -target spirv -profile spirv_1_5 -emit-spirv-directly \
+  -fvk-use-entrypoint-name -fvk-use-c-layout -matrix-layout-row-major \
+  -capability spvDescriptorHeapEXT -entry computeMain -stage compute -o shader.comp.spv
+spirv-val --target-env vulkan1.4 --scalar-block-layout shader.comp.spv
+
+slangc shader.slang -target metal -DNOGRAPHICSAPI_METAL -matrix-layout-row-major \
+  -entry computeMain -stage compute -o shader.comp.metal
+xcrun -sdk macosx metal -std=metal4.0 -c shader.comp.metal -o shader.comp.air
+xcrun -sdk macosx metallib shader.comp.air -o shader.comp.metallib
 ```
 
-Every shader requires `-matrix-layout-row-major` and `spvDescriptorHeapEXT`. Matrices and descriptor
-heaps are part of the expected shader model, not opt-in cases. The significant choices are:
+For iOS 26 device libraries, use `-sdk iphoneos` in both Xcode commands and add
+`-target air64-apple-ios26.0` to the `metal` command. Shared sources and shader metadata stay the same;
+the resulting metallib is specific to its target platform.
 
-- `spirv_1_5` is the project baseline;
-- the direct SPIR-V backend avoids an intermediate source-language translation;
-- entry-point names are preserved because PSO creation expects `vertexMain`, `fragmentMain`,
-  `taskMain`, `meshMain`, or `computeMain`;
-- `-fvk-use-c-layout` is required to give shared POD structures the C-compatible layout expected by
-  C++;
-- row-major matrix layout establishes the expected representation for matrix-bearing shared
-  structures; and
-- `spvDescriptorHeapEXT` enables native `ResourceDescriptorHeap` and `SamplerDescriptorHeap` syntax
-  and brings in the required untyped-pointer capability.
+Task and mesh Vulkan stages also require `spvMeshShadingEXT`. Entry names are preserved on both
+targets. Assign whole vertex structs to mesh outputs; Metal does not accept field-wise output writes.
 
-Task and mesh shaders additionally request `spvMeshShadingEXT`. Compile `taskMain` with
-`-stage amplification`; its payload selects and launches mesh workgroups with `DispatchMesh`.
-Mesh shaders use `-stage mesh` and triangle output. Set `MeshPSODesc::task_spirv` to attach the task stage;
-an empty span launches mesh workgroups directly. Both stages receive the draw's shared root.
+`ShaderStage` carries bytes, an entry name, and compiled threadgroup size. Apple devices accept
+precompiled metallib; Vulkan accepts SPIR-V. Debug builds assert the expected artifact header.
+On Metal, compute, task and mesh `threadgroup_size` must match `numthreads`; use the same shared
+constant at shader and PSO call sites. Vulkan reads the dimensions from SPIR-V. Shader compilation
+belongs to the build system; the API performs no runtime SPIR-V translation. The library has no built-in shader programs; `shader.slang` supplies helpers for application shaders.
 
-## Root ABI
-
-A root structure is declared once in a header included by C++ and Slang:
-
-```cpp
-struct RootArguments
-{
-    Vertex* vertices;
-    float4x4 transform;
-};
-```
-
-The CPU fills pointer fields with GPU virtual addresses and passes the structure directly to a draw
-or dispatch.
-
-The shader declares the same structure in push-constant storage:
-
-```slang
-[[vk::push_constant]]
-ConstantBuffer<RootArguments> root;
-```
-
-Each draw or dispatch copies the complete root with `vkCmdPushDataEXT` immediately before the native
-command. A rootless call passes `{}` and emits no push-data command. The CPU value can be stack-local
-because its bytes are consumed during the call. Resources referenced by its pointer fields remain
-live through submission, and mutable contents remain stable until the timeline point completes.
-
-This differs deliberately from the blog's GPU-resident, stage-specific roots. Vulkan push data
-cannot source its payload from GPU memory, so `NoGraphicsAPI` uses one small CPU root shared by the
-active graphics stages. Arbitrary larger structures remain reachable through GPU pointers, without
-a binding layout.
-
-Root structures must be trivially copyable, use a byte size divisible by four, and fit within 256 bytes
-and `DeviceCaps::max_push_data_size`.
-
-## Typed GPU pointers
-
-CPU-visible `GpuCpuRange<T>` values provide typed CPU and GPU addresses; their `size` remains a byte
-count. The CPU writes through the CPU address and copies the GPU address into shared data. Slang sees
-that field as an ordinary typed pointer:
-
-```slang
-Vertex vertex = root.vertices[vertex_id];
-```
-
-Slang lowers the pointer to SPIR-V physical-storage-buffer addressing. There is no public buffer
-handle or shader buffer descriptor. GPU pointers carry no bounds, must not be dereferenced by the
-CPU, and remain the application's alignment, range, synchronization, and lifetime responsibility.
-Opaque textures and samplers use heap indices instead.
-
-Use typed pointer fields instead of round-tripping addresses through `uint64_t`; the latter can add
-an unnecessary `shaderInt64` requirement.
-
-## Application-owned descriptor heaps
-
-The application chooses slots in separate mapped texture and sampler descriptor heaps, writes them,
-and binds their GPU ranges with `set_texture_descriptor_heap()` and
-`set_sampler_descriptor_heap()`. Slot addresses use the corresponding descriptor size from
-`DeviceCaps`.
-
-Shaders index the heaps directly:
-
-```slang
-Texture2D<float4> texture = ResourceDescriptorHeap[texture_index];
-SamplerState sampler = SamplerDescriptorHeap[sampler_index];
-```
-
-Texture and sampler indices are separate 32-bit namespaces. The texture declaration must match the
-descriptor view; `TextureDescriptorDesc` selects its format, mip/layer range, and aspect. Buffer data
-uses GPU pointers and needs no descriptor entry. Slot lifetime and reuse remain application policy.
-`SPV_EXT_descriptor_heap` treats resource access as non-uniform by default, so no conventional
-descriptor-set declaration or manual `NonUniform` decoration is needed.
-
-## Shared data layout
-
-Shared headers include `<NoGraphicsAPIUtility/shader_types.h>`, which provides matching plain
-scalar, vector, and matrix types for C++ and Slang. Both languages use `T*` for GPU-address fields.
-
-Compile every shader with the required `-fvk-use-c-layout` and `-matrix-layout-row-major` options.
-Use the supplied types and explicit padding, and ensure every pointer field contains a GPU address
-rather than a host address.
-
-Use integer fields for shared booleans; C++ and Slang boolean-vector layouts are not compatible. The
-runtime enables scalar block layout plus 16-bit arithmetic and storage for root and BDA data. The
-provided C++ `float16_t` is a bit container, not a host arithmetic type. Eight-bit root and BDA
-members are not currently supported by the enabled Vulkan feature set.
-
-## Current boundaries
-
-- Root data is CPU push data, not a GPU-resident root pointer.
-- Texture and sampler heaps use native `SPV_EXT_descriptor_heap`; conventional descriptor bindings
-  are outside this shader model.
-- BDA pointers are unbounded and cannot point to opaque textures.
-- `NoGraphicsAPI` does not support specialization constants because Slang and Vulkan do not expose
-  them as a single C-compatible POD structure.
+The `test_shader_abi` GPU test checks packed roots, matrices, pointer stores, divergent texture-pool
+indices, and sampler indices 4092–4095. The task test exercises shared task/mesh shaders.
+Metal texture-handle construction is isolated in the common header; see
+[the Metal implementation](metal-support.md#root-abi-and-shared-shaders) for its representation.
 
 ## References
 
-- [Slang command-line reference](https://github.com/shader-slang/slang/blob/master/docs/command-line-slangc-reference.md)
-- [Slang direct descriptor-heap indexing][slang-heaps]
-- [Slang pointers](https://github.com/shader-slang/slang/blob/master/docs/user-guide/03-convenience-features.md#pointers-limited)
-- [Slang SPIR-V global-memory pointers](https://github.com/shader-slang/slang/blob/master/docs/user-guide/a2-01-spirv-target-specific.md#global-memory-pointers)
-- [`SPV_EXT_descriptor_heap`](https://github.khronos.org/SPIRV-Registry/extensions/EXT/SPV_EXT_descriptor_heap.html)
-- [`VK_EXT_descriptor_heap` push-data proposal](https://github.com/KhronosGroup/Vulkan-Docs/blob/main/proposals/VK_EXT_descriptor_heap.adoc)
-
-[slang-heaps]: https://github.com/shader-slang/slang/blob/master/docs/user-guide/03-convenience-features.md#direct-descriptor-heap-indexing
+- [Slang target interoperation](https://shader-slang.org/slang/user-guide/a1-04-interop.html)
+- [Slang Metal target](https://github.com/shader-slang/slang/blob/master/docs/user-guide/a2-02-metal-target-specific.md)
+- [SPV_EXT_descriptor_heap](https://github.khronos.org/SPIRV-Registry/extensions/EXT/SPV_EXT_descriptor_heap.html)

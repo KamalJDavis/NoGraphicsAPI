@@ -55,11 +55,13 @@ public:
         end_compute();
     }
 
-    // The device's per-command-buffer timestamp limit applies to each batch.
-    void write_timestamp(uint64* gpu_destination) noexcept;
+    // The device's per-command-buffer timestamp limit applies to each batch. Keep CPU destinations valid until the batch is reclaimed.
+    void write_timestamp(uint64* cpu_destination) noexcept;
     // Returns the latest upload completion point, borrowing this uploader's semaphore. Other queues can consume it through SubmitDesc::waits.
     TimelinePoint flush() noexcept;
     void wait() noexcept;
+    // Retrieves timestamps and reclaims completed batches without waiting or flushing pending uploads. wait() also reclaims all batches.
+    void reclaim() noexcept;
     // Occupied bytes and pending batches reflect retirements observed by the most recent operation.
     [[nodiscard]] UploadQueueStats stats() const noexcept;
 
@@ -99,7 +101,6 @@ private:
     };
 
     CommandBuffer* begin() noexcept;
-    void reclaim() noexcept;
     void wait_oldest() noexcept;
     GpuCpuRange<byte> reserve(uint64 byte_size) noexcept;
     GpuCpuRange<byte> begin_compute(uint64 byte_size) noexcept;

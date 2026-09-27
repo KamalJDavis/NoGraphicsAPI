@@ -1,3 +1,4 @@
+#include <NoGraphicsAPI/shader.slang>
 #include "gbuffer_shared.h"
 
 struct GBufferVertexOutput
@@ -7,11 +8,11 @@ struct GBufferVertexOutput
     float3 world_normal : NORMAL0;
 };
 
-[[vk::push_constant]] ConstantBuffer<GBufferRoot> root;
+GPU_ROOT(GBufferRoot, root);
 
 [shader("mesh")]
 [outputtopology("triangle")]
-[numthreads(32, 1, 1)]
+[numthreads(gbuffer_thread_count, 1, 1)]
 void meshMain(uint thread_index : SV_GroupIndex, uint3 group_id : SV_GroupID, out vertices GBufferVertexOutput vertices[24], out indices uint3 triangles[12])
 {
     SetMeshOutputCounts(24, 12);

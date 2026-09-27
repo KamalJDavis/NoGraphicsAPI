@@ -20,7 +20,7 @@ static const uint64 data_bytes = sizeof(TaskTestData) + sizeof(gpu::uint32x3);
 struct ShaderCode
 {
     uint32 words[8192];
-    uint32 count = 0;
+    uint32 size = 0;
 };
 
 struct Fixture
@@ -44,11 +44,16 @@ static bool load_shader(const char* path, ShaderCode& code) noexcept
     fseek(file, 0, SEEK_END);
     long bytes = ftell(file);
     rewind(file);
-    if (bytes < 20 || uint64(bytes) > sizeof(code.words) || (bytes & 3)) { fclose(file); return false; }
+    if (bytes < 20 || uint64(bytes) > sizeof(code.words)) { fclose(file); return false; }
     bool read = fread(code.words, 1, size_t(bytes), file) == size_t(bytes);
     fclose(file);
-    if (!read || code.words[0] != 0x07230203u) return false;
-    code.count = uint32(bytes) / 4;
+    if (!read) return false;
+#ifdef __APPLE__
+    if (memcmp(code.words, "MTLB", 4) != 0) return false;
+#else
+    if ((bytes & 3) || code.words[0] != 0x07230203u) return false;
+#endif
+    code.size = uint32(bytes);
     return true;
 }
 
@@ -57,12 +62,14 @@ static bool initialize(Fixture& fixture) noexcept
     ShaderCode task{};
     ShaderCode mesh{};
     ShaderCode fragment{};
-    if (!load_shader(NOGRAPHICSAPI_TASK_TEST_TASK_SPV, task) || !load_shader(NOGRAPHICSAPI_TASK_TEST_MESH_SPV, mesh)
-        || !load_shader(NOGRAPHICSAPI_TASK_TEST_FRAGMENT_SPV, fragment)) return false;
+    if (!load_shader(NOGRAPHICSAPI_TASK_TEST_TASK_SHADER, task) || !load_shader(NOGRAPHICSAPI_TASK_TEST_MESH_SHADER, mesh)
+        || !load_shader(NOGRAPHICSAPI_TASK_TEST_FRAGMENT_SHADER, fragment)) return false;
     fixture.pso = gpu::create_mesh_pso(fixture.device, {
-        .task_spirv = {task.words, task.count},
-        .mesh_spirv = {mesh.words, mesh.count},
-        .fragment_spirv = {fragment.words, fragment.count},
+        .task = {.code = {task.words, task.size}, .entry_point = "taskMain",
+            .threadgroup_size = {.x = task_test_batch_size, .y = 1, .z = 1}},
+        .mesh = {.code = {mesh.words, mesh.size}, .entry_point = "meshMain",
+            .threadgroup_size = {.x = task_test_batch_size, .y = 1, .z = 1}},
+        .fragment = {.code = {fragment.words, fragment.size}, .entry_point = "fragmentMain"},
         .color_targets = {{.format = gpu::Format::rgba8_unorm}},
     });
     if (!fixture.pso) return false;
@@ -160,18 +167,26 @@ static bool render_case(Fixture& fixture, uint32 count, uint32 visible_mask, uin
     return valid;
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    const bool direct_only = argc == 2 && strcmp(argv[1], "--direct-only") == 0;
+    if (argc != 1 && !direct_only)
+    {
+        fprintf(stderr, "Usage: %s [--direct-only]\n", argv[0]);
+        return 1;
+    }
     const gpu::DeviceInit initialized = gpu::create_device({.timestamp_query_count = 0});
     if (initialized.error == gpu::Error::unsupported) return 77;
     if (initialized.error != gpu::Error::none) return 1;
     Fixture fixture{.device = initialized.device};
+    const bool test_indirect = !direct_only && gpu::get_device_caps(fixture.device).indirect_mesh_draw;
+    if (!direct_only && !test_indirect) printf("Native indirect mesh draws unavailable; testing direct task/mesh draws.\n");
     bool valid = initialize(fixture);
     if (valid)
     {
         const uint32 counts[] = {0, 1, 32, 33, 70, 70, 70};
         const uint32 masks[] = {7, 7, 7, 5, 7, 2, 0};
-        for (uint32 indirect = 0; indirect < 2; ++indirect)
+        for (uint32 indirect = 0; indirect < (test_indirect ? 2u : 1u); ++indirect)
             for (uint32 scenario = 0; scenario < sizeof(counts) / sizeof(counts[0]); ++scenario)
                 valid &= render_case(fixture, counts[scenario], masks[scenario], scenario, indirect != 0);
     }

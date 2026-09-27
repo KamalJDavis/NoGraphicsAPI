@@ -44,6 +44,12 @@ constexpr uint32 gpu_allocation_alignment = 16;
 constexpr uint32 max_surface_formats = 64;
 constexpr uint32 format_count = static_cast<uint32>(Format::undefined);
 
+enum class DescriptorHeapType : uint8
+{
+    texture,
+    sampler,
+};
+
 [[nodiscard]] Error error_from_vk(VkResult result) noexcept
 {
     switch (result)
@@ -461,7 +467,6 @@ struct DeviceFunctions
     PFN_vkCmdCopyMemoryKHR cmd_copy_memory = nullptr;
     PFN_vkCmdCopyMemoryToImageKHR cmd_copy_memory_to_image = nullptr;
     PFN_vkCmdCopyImageToMemoryKHR cmd_copy_image_to_memory = nullptr;
-    PFN_vkCmdCopyQueryPoolResultsToMemoryKHR cmd_copy_query_pool_results_to_memory = nullptr;
 };
 
 struct BackingBuffer
@@ -550,6 +555,20 @@ struct GpuHeapOwner
     detail::BackingBuffer backing;
 };
 
+struct TextureDescriptorHeap
+{
+    Device* state = nullptr;
+    GpuHeap storage = {};
+    uint32 capacity = 0;
+};
+
+struct SamplerDescriptorHeap
+{
+    Device* state = nullptr;
+    GpuHeap storage = {};
+    uint32 capacity = 0;
+};
+
 struct TextureHeapOwner
 {
     Device* state = nullptr;
@@ -570,10 +589,11 @@ struct CommandBuffer
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkCommandBuffer epilogue = VK_NULL_HANDLE;
     VkQueryPool timestamp_pool = VK_NULL_HANDLE;
-    VkDeviceAddress* timestamp_destinations = nullptr;
+    uint64** timestamp_destinations = nullptr;
+    uint64* timestamp_results = nullptr;
     uint32 timestamp_count = 0;
     Swapchain* swapchain = nullptr;
-    bool suspending = false;
+    bool submitted = false;
     bool has_epilogue = false;
 };
 
@@ -746,7 +766,7 @@ struct Device
     }
 
     [[nodiscard]] GpuHeap allocate_gpu_heap(VkDeviceSize size, MemoryType memory) noexcept;
-    [[nodiscard]] GpuHeap allocate_descriptor_heap(VkDeviceSize size, MemoryType memory) noexcept;
+    [[nodiscard]] GpuHeap allocate_descriptor_heap(VkDeviceSize size, DescriptorHeapType type) noexcept;
     [[nodiscard]] uint64 next_presentation_retirement() noexcept;
     void poll_presentation_retirement() noexcept;
     void wait_presentation_retirement(uint64 value) noexcept;
@@ -1154,9 +1174,6 @@ void Device::drain_contexts() noexcept
 
 GpuHeap Device::allocate_gpu_heap(VkDeviceSize size, MemoryType memory) noexcept
 {
-    if (memory == MemoryType::texture_descriptor_heap || memory == MemoryType::sampler_descriptor_heap)
-        return allocate_descriptor_heap(size, memory);
-
     VkMemoryPropertyFlags required = 0;
     VkMemoryPropertyFlags preferred = 0;
     VkMemoryPropertyFlags avoided = 0;
@@ -1190,16 +1207,15 @@ GpuHeap Device::allocate_gpu_heap(VkDeviceSize size, MemoryType memory) noexcept
     };
 }
 
-GpuHeap Device::allocate_descriptor_heap(VkDeviceSize size, MemoryType memory) noexcept
+GpuHeap Device::allocate_descriptor_heap(VkDeviceSize size, DescriptorHeapType type) noexcept
 {
-    assert(memory == MemoryType::texture_descriptor_heap || memory == MemoryType::sampler_descriptor_heap);
-    const bool texture_heap = memory == MemoryType::texture_descriptor_heap;
     const VkDeviceSize resource_alignment = heap_properties.imageDescriptorAlignment > heap_properties.bufferDescriptorAlignment
                                                 ? heap_properties.imageDescriptorAlignment
                                                 : heap_properties.bufferDescriptorAlignment;
-    const VkDeviceSize reserved_alignment = texture_heap ? resource_alignment : heap_properties.samplerDescriptorAlignment;
-    const VkDeviceSize heap_alignment = texture_heap ? heap_properties.resourceHeapAlignment : heap_properties.samplerHeapAlignment;
-    const VkDeviceSize reserved_size = texture_heap ? heap_properties.minResourceHeapReservedRange : heap_properties.minSamplerHeapReservedRange;
+    const VkDeviceSize reserved_alignment = type == DescriptorHeapType::texture ? resource_alignment : heap_properties.samplerDescriptorAlignment;
+    const VkDeviceSize heap_alignment = type == DescriptorHeapType::texture ? heap_properties.resourceHeapAlignment : heap_properties.samplerHeapAlignment;
+    const VkDeviceSize reserved_size = type == DescriptorHeapType::texture
+        ? heap_properties.minResourceHeapReservedRange : heap_properties.minSamplerHeapReservedRange;
 
     const VkDeviceSize reserved_offset = align_up(size, reserved_alignment);
     const VkDeviceSize bind_size = reserved_offset + reserved_size;
@@ -1878,15 +1894,13 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
     state->fn.cmd_copy_memory = load_device_proc<PFN_vkCmdCopyMemoryKHR>(state->device, "vkCmdCopyMemoryKHR");
     state->fn.cmd_copy_memory_to_image = load_device_proc<PFN_vkCmdCopyMemoryToImageKHR>(state->device, "vkCmdCopyMemoryToImageKHR");
     state->fn.cmd_copy_image_to_memory = load_device_proc<PFN_vkCmdCopyImageToMemoryKHR>(state->device, "vkCmdCopyImageToMemoryKHR");
-    state->fn.cmd_copy_query_pool_results_to_memory =
-        load_device_proc<PFN_vkCmdCopyQueryPoolResultsToMemoryKHR>(state->device, "vkCmdCopyQueryPoolResultsToMemoryKHR");
     if (!state->fn.write_sampler_descriptors || !state->fn.write_resource_descriptors ||
         !state->fn.cmd_bind_sampler_heap || !state->fn.cmd_bind_texture_heap ||
         !state->fn.cmd_push_data || !state->fn.cmd_bind_index_buffer ||
         !state->fn.cmd_draw_indirect || !state->fn.cmd_draw_indexed_indirect ||
         !state->fn.cmd_dispatch_indirect || !state->fn.cmd_draw_mesh_tasks ||
         !state->fn.cmd_draw_mesh_tasks_indirect || !state->fn.cmd_copy_memory ||
-        !state->fn.cmd_copy_memory_to_image || !state->fn.cmd_copy_image_to_memory || !state->fn.cmd_copy_query_pool_results_to_memory)
+        !state->fn.cmd_copy_memory_to_image || !state->fn.cmd_copy_image_to_memory)
     {
         return fail_device_creation(state, Error::driver_error);
     }
@@ -1921,13 +1935,12 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         .copy_texture_granularity = selected.copy_texture_granularity,
         .max_push_data_size = state->heap_properties.maxPushDataSize,
         .texture_heap_alignment = state->texture_heap_alignment,
-        .texture_descriptor_size = state->heap_properties.imageDescriptorSize,
-        .sampler_descriptor_size = state->heap_properties.samplerDescriptorSize,
         .timestamp_period_ns = selected.properties.limits.timestampPeriod,
         .sub_texel_precision_bits = selected.properties.limits.subTexelPrecisionBits,
         .texture_compression_bc = selected.texture_compression_bc,
         .texture_compression_astc = selected.texture_compression_astc,
         .storage_input_output16 = selected.storage_input_output16,
+        .indirect_mesh_draw = true,
     };
     if (presentation)
     {
@@ -1999,12 +2012,13 @@ void wait_timeline(TimelinePoint point) noexcept
         ~uint64{0}));
 }
 
-void write_timestamp(CommandBuffer* commands, uint64* gpu_destination, Stage stage) noexcept
+void write_timestamp(CommandBuffer* commands, uint64* cpu_destination, Stage stage) noexcept
 {
     assert(commands && commands->state);
     if (!commands->timestamp_pool) return;
     assert(commands->timestamp_count < commands->state->timestamp_query_count);
-    commands->timestamp_destinations[commands->timestamp_count] = static_cast<VkDeviceAddress>(reinterpret_cast<uintptr>(gpu_destination));
+    assert(cpu_destination);
+    commands->timestamp_destinations[commands->timestamp_count] = cpu_destination;
     vkCmdWriteTimestamp2(commands->command_buffer, to_vk(stage), commands->timestamp_pool, commands->timestamp_count++);
 }
 
@@ -2604,10 +2618,67 @@ void destroy_render_view(RenderView* render_view) noexcept
     delete render_view;
 }
 
-void write_texture_descriptor(Device* device, void* cpu_destination, const Texture* texture, TextureDescriptorType type,
+TextureDescriptorHeap* create_texture_descriptor_heap(Device* device, uint32 capacity) noexcept
+{
+    assert(device && capacity);
+    return new TextureDescriptorHeap{
+        .state = device,
+        .storage = device->allocate_descriptor_heap(uint64(capacity) * device->heap_properties.imageDescriptorSize, DescriptorHeapType::texture),
+        .capacity = capacity,
+    };
+}
+
+void destroy_texture_descriptor_heap(TextureDescriptorHeap* heap) noexcept
+{
+    if (!heap) return;
+    destroy_gpu_heap(heap->storage);
+    delete heap;
+}
+
+SamplerDescriptorHeap* create_sampler_descriptor_heap(Device* device, uint32 capacity) noexcept
+{
+    assert(device && capacity);
+    return new SamplerDescriptorHeap{
+        .state = device,
+        .storage = device->allocate_descriptor_heap(uint64(capacity) * device->heap_properties.samplerDescriptorSize, DescriptorHeapType::sampler),
+        .capacity = capacity,
+    };
+}
+
+void destroy_sampler_descriptor_heap(SamplerDescriptorHeap* heap) noexcept
+{
+    if (!heap) return;
+    destroy_gpu_heap(heap->storage);
+    delete heap;
+}
+
+void copy_texture_descriptors(const TextureDescriptorHeap* source, uint32 source_index, TextureDescriptorHeap* destination,
+                              uint32 destination_index, uint32 count) noexcept
+{
+    assert(source && destination && source->state == destination->state);
+    assert(source_index <= source->capacity && count <= source->capacity - source_index);
+    assert(destination_index <= destination->capacity && count <= destination->capacity - destination_index);
+    const uint64 stride = source->state->heap_properties.imageDescriptorSize;
+    memmove(destination->storage.range.cpu + uint64(destination_index) * stride,
+            source->storage.range.cpu + uint64(source_index) * stride, size_t(count * stride));
+}
+
+void copy_sampler_descriptors(const SamplerDescriptorHeap* source, uint32 source_index, SamplerDescriptorHeap* destination,
+                              uint32 destination_index, uint32 count) noexcept
+{
+    assert(source && destination && source->state == destination->state);
+    assert(source_index <= source->capacity && count <= source->capacity - source_index);
+    assert(destination_index <= destination->capacity && count <= destination->capacity - destination_index);
+    const uint64 stride = source->state->heap_properties.samplerDescriptorSize;
+    memmove(destination->storage.range.cpu + uint64(destination_index) * stride,
+            source->storage.range.cpu + uint64(source_index) * stride, size_t(count * stride));
+}
+
+void write_texture_descriptor(TextureDescriptorHeap* heap, uint32 index, const Texture* texture, TextureDescriptorType type,
                               const TextureDescriptorDesc& desc) noexcept
 {
-    assert(device && texture);
+    assert(heap && texture && index < heap->capacity && heap->state == texture->state);
+    Device* device = heap->state;
 
     const VkImageUsageFlags descriptor_usage = static_cast<VkImageUsageFlags>(
         type == TextureDescriptorType::sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : VK_IMAGE_USAGE_STORAGE_BIT);
@@ -2654,15 +2725,16 @@ void write_texture_descriptor(Device* device, void* cpu_destination, const Textu
         .data = {.pImage = &image_descriptor},
     };
     const VkHostAddressRangeEXT destination{
-        .address = cpu_destination,
+        .address = heap->storage.range.cpu + uint64(index) * device->heap_properties.imageDescriptorSize,
         .size = static_cast<size_t>(device->heap_properties.imageDescriptorSize),
     };
     assert_vk(device->fn.write_resource_descriptors(device->device, 1, &descriptor_info, &destination));
 }
 
-void write_sampler_descriptor(Device* device, void* cpu_destination, const SamplerDesc& desc) noexcept
+void write_sampler_descriptor(SamplerDescriptorHeap* heap, uint32 index, const SamplerDesc& desc) noexcept
 {
-    assert(device);
+    assert(heap && index < heap->capacity);
+    Device* device = heap->state;
     const VkSamplerCreateInfo sampler_info{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = static_cast<VkFilter>(desc.mag_filter),
@@ -2678,7 +2750,7 @@ void write_sampler_descriptor(Device* device, void* cpu_destination, const Sampl
         .maxLod = VK_LOD_CLAMP_NONE,
     };
     const VkHostAddressRangeEXT destination{
-        .address = cpu_destination,
+        .address = heap->storage.range.cpu + uint64(index) * device->heap_properties.samplerDescriptorSize,
         .size = static_cast<size_t>(device->heap_properties.samplerDescriptorSize),
     };
     assert_vk(device->fn.write_sampler_descriptors(device->device, 1, &sampler_info, &destination));
@@ -2687,47 +2759,57 @@ void write_sampler_descriptor(Device* device, void* cpu_destination, const Sampl
 namespace
 {
 
-PSO* create_raster_pso(Device* device, Span<const uint32> first_stage_spirv, Span<const uint32> fragment_spirv, Span<const ColorTargetDesc> color_targets,
+void assert_spirv(ByteSpan code) noexcept
+{
+    assert(code.data && code.size >= 5 * sizeof(uint32) && code.size % sizeof(uint32) == 0 &&
+           reinterpret_cast<uintptr>(code.data) % alignof(uint32) == 0 && "PSO stages require aligned SPIR-V binaries");
+    assert(*reinterpret_cast<const uint32*>(code.data) == 0x07230203u && "PSO stage does not contain SPIR-V");
+}
+
+PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const ShaderStage& fragment, Span<const ColorTargetDesc> color_targets,
                        Format depth_format, Format stencil_format, const RasterizationState& rasterization_state,
-                       bool mesh, Span<const uint32> task_spirv = {}) noexcept
+                       bool mesh, const ShaderStage& task = {}) noexcept
 {
     assert(device && "PSO creation called with a null device");
+    assert_spirv(first_stage.code);
+    if (task.code.size) assert_spirv(task.code);
+    if (fragment.code.size) assert_spirv(fragment.code);
     assert((color_targets.size == 0 || color_targets.data) && color_targets.size <= max_color_attachments &&
            "color targets must fit the wrapper's attachment array");
 
     const VkShaderModuleCreateInfo task_module_info{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = task_spirv.size * sizeof(uint32),
-        .pCode = task_spirv.data,
+        .codeSize = task.code.size,
+        .pCode = reinterpret_cast<const uint32*>(task.code.data),
     };
     const VkShaderModuleCreateInfo first_stage_module_info{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = first_stage_spirv.size * sizeof(uint32),
-        .pCode = first_stage_spirv.data,
+        .codeSize = first_stage.code.size,
+        .pCode = reinterpret_cast<const uint32*>(first_stage.code.data),
     };
     const VkShaderModuleCreateInfo fragment_module_info{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = fragment_spirv.size * sizeof(uint32),
-        .pCode = fragment_spirv.data,
+        .codeSize = fragment.code.size,
+        .pCode = reinterpret_cast<const uint32*>(fragment.code.data),
     };
     const VkPipelineShaderStageCreateInfo stages[]{
         VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .pNext = &task_module_info,
             .stage = VK_SHADER_STAGE_TASK_BIT_EXT,
-            .pName = "taskMain",
+            .pName = task.entry_point,
         },
         VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .pNext = &first_stage_module_info,
             .stage = mesh ? VK_SHADER_STAGE_MESH_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT,
-            .pName = mesh ? "meshMain" : "vertexMain",
+            .pName = first_stage.entry_point,
         },
         VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .pNext = &fragment_module_info,
             .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .pName = "fragmentMain",
+            .pName = fragment.entry_point,
         },
     };
     const VkPipelineVertexInputStateCreateInfo vertex_input{
@@ -2817,8 +2899,8 @@ PSO* create_raster_pso(Device* device, Span<const uint32> first_stage_spirv, Spa
     const VkGraphicsPipelineCreateInfo pso_info{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = &flags_info,
-        .stageCount = 1u + (task_spirv.size ? 1u : 0u) + (fragment_spirv.size ? 1u : 0u),
-        .pStages = stages + (task_spirv.size ? 0u : 1u),
+        .stageCount = 1u + (task.code.size ? 1u : 0u) + (fragment.code.size ? 1u : 0u),
+        .pStages = stages + (task.code.size ? 0u : 1u),
         .pVertexInputState = mesh ? nullptr : &vertex_input,
         .pInputAssemblyState = mesh ? nullptr : &input_assembly,
         .pViewportState = &viewport_state,
@@ -2841,30 +2923,31 @@ PSO* create_raster_pso(Device* device, Span<const uint32> first_stage_spirv, Spa
 
 PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 {
-    return create_raster_pso(device, desc.vertex_spirv, desc.fragment_spirv, desc.color_targets, desc.depth_format,
+    return create_raster_pso(device, desc.vertex, desc.fragment, desc.color_targets, desc.depth_format,
                              desc.stencil_format, desc.rasterization, false);
 }
 
 PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
 {
-    return create_raster_pso(device, desc.mesh_spirv, desc.fragment_spirv, desc.color_targets, desc.depth_format,
-                             desc.stencil_format, desc.rasterization, true, desc.task_spirv);
+    return create_raster_pso(device, desc.mesh, desc.fragment, desc.color_targets, desc.depth_format,
+                             desc.stencil_format, desc.rasterization, true, desc.task);
 }
 
-PSO* create_compute_pso(Device* device, Span<const uint32> compute_spirv) noexcept
+PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
 {
     assert(device && "create_compute_pso called with a null device");
+    assert_spirv(compute.code);
 
     const VkShaderModuleCreateInfo module_info{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = compute_spirv.size * sizeof(uint32),
-        .pCode = compute_spirv.data,
+        .codeSize = compute.code.size,
+        .pCode = reinterpret_cast<const uint32*>(compute.code.data),
     };
     const VkPipelineShaderStageCreateInfo stage{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pNext = &module_info,
         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .pName = "computeMain",
+        .pName = compute.entry_point,
     };
     const VkPipelineCreateFlags2CreateInfo flags_info{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO,
@@ -2912,6 +2995,7 @@ void destroy_command_pool(CommandPool* pool) noexcept
         pool->first = commands->next;
         if (commands->timestamp_pool) vkDestroyQueryPool(pool->state->device, commands->timestamp_pool, nullptr);
         free(commands->timestamp_destinations);
+        free(commands->timestamp_results);
         delete commands;
     }
     vkDestroyCommandPool(pool->state->device, pool->command_pool, nullptr);
@@ -2921,12 +3005,28 @@ void destroy_command_pool(CommandPool* pool) noexcept
 void reset_command_pool(CommandPool* pool) noexcept
 {
     assert(pool && pool->state && pool->command_pool);
-#if !defined(NDEBUG)
     for (CommandBuffer* commands = pool->first; commands; commands = commands->next)
+    {
         assert(!commands->swapchain && "an acquired swapchain image must be presented before resetting its command pool");
-#endif
+        commands->submitted = false;
+        commands->timestamp_count = 0;
+    }
     assert_vk(vkResetCommandPool(pool->state->device, pool->command_pool, 0));
     pool->next_buffer = pool->first;
+}
+
+void read_timestamps(CommandPool* pool) noexcept
+{
+    assert(pool && pool->state);
+    for (CommandBuffer* commands = pool->first; commands; commands = commands->next)
+    {
+        if (!commands->submitted || commands->timestamp_count == 0) continue;
+        assert_vk(vkGetQueryPoolResults(pool->state->device, commands->timestamp_pool, 0, commands->timestamp_count,
+                                       sizeof(uint64) * commands->timestamp_count, commands->timestamp_results, sizeof(uint64), VK_QUERY_RESULT_64_BIT));
+        for (uint32 index = 0; index < commands->timestamp_count; ++index)
+            *commands->timestamp_destinations[index] = commands->timestamp_results[index];
+        commands->timestamp_count = 0;
+    }
 }
 
 CommandBuffer* begin_commands(CommandPool* pool) noexcept
@@ -2955,7 +3055,8 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
                 .queryCount = pool->state->timestamp_query_count,
             };
             require_vk(vkCreateQueryPool(pool->state->device, &query_info, nullptr, &commands->timestamp_pool));
-            commands->timestamp_destinations = static_cast<VkDeviceAddress*>(malloc(sizeof(VkDeviceAddress) * pool->state->timestamp_query_count));
+            commands->timestamp_destinations = static_cast<uint64**>(malloc(sizeof(uint64*) * pool->state->timestamp_query_count));
+            commands->timestamp_results = static_cast<uint64*>(malloc(sizeof(uint64) * pool->state->timestamp_query_count));
         }
         if (pool->last)
             pool->last->next = commands;
@@ -2970,7 +3071,7 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
     };
     assert_vk(vkBeginCommandBuffer(commands->command_buffer, &begin_info));
     commands->timestamp_count = 0;
-    commands->suspending = false;
+    commands->submitted = false;
     commands->has_epilogue = false;
     if (commands->timestamp_pool)
         vkResetQueryPool(pool->state->device, commands->timestamp_pool, 0, pool->state->timestamp_query_count);
@@ -2981,7 +3082,7 @@ void end_commands(CommandBuffer* commands) noexcept
 {
     assert(commands);
     VkCommandBuffer command_buffer = commands->command_buffer;
-    if (commands->swapchain || (commands->suspending && commands->timestamp_count != 0))
+    if (commands->swapchain)
     {
         assert_vk(vkEndCommandBuffer(command_buffer));
         if (!commands->epilogue)
@@ -3001,9 +3102,6 @@ void end_commands(CommandBuffer* commands) noexcept
         command_buffer = commands->epilogue;
         assert_vk(vkBeginCommandBuffer(command_buffer, &begin_info));
         commands->has_epilogue = true;
-    }
-    if (commands->swapchain)
-    {
         Swapchain* swapchain = commands->swapchain;
         assert(swapchain->acquired && swapchain->transition_commands == commands);
         const VkImageMemoryBarrier2 barrier{
@@ -3024,18 +3122,6 @@ void end_commands(CommandBuffer* commands) noexcept
         };
         record_image_barriers(command_buffer, {&barrier, 1});
     }
-    for (uint32 timestamp = 0; timestamp < commands->timestamp_count; ++timestamp)
-    {
-        const VkStridedDeviceAddressRangeKHR destination{
-            .address = commands->timestamp_destinations[timestamp],
-            .size = sizeof(uint64),
-            .stride = sizeof(uint64),
-        };
-        commands->state->fn.cmd_copy_query_pool_results_to_memory(command_buffer, commands->timestamp_pool, timestamp, 1,
-                                                                 &destination, address_flags, VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-    }
-    if (commands->timestamp_count != 0)
-        record_barrier(command_buffer, Stage::transfer, Access::transfer_write, Stage::host, Access::host_read);
     assert_vk(vkEndCommandBuffer(command_buffer));
 }
 
@@ -3071,7 +3157,7 @@ void submit_commands(Device* device, const SubmitDesc& desc, uint32 queue_index,
             .deviceMask = 1,
         };
     }
-    // Deferred query copies and presentation transitions must follow every suspended/resumed segment.
+    // Presentation transitions must follow every suspended/resumed segment.
     size_t epilogue_index = desc.commands.size;
     for (size_t index = 0; index < desc.commands.size; ++index)
     {
@@ -3145,6 +3231,7 @@ void submit_commands(Device* device, const SubmitDesc& desc, uint32 queue_index,
         .pSignalSemaphoreInfos = signal_infos,
     };
     assert_vk(vkQueueSubmit2(queue->queue, 1, &submit_info, VK_NULL_HANDLE));
+    for (size_t index = 0; index < desc.commands.size; ++index) desc.commands.data[index]->submitted = true;
 }
 
 } // namespace
@@ -3331,13 +3418,13 @@ void emit_root_data(CommandBuffer* commands, ByteSpan root) noexcept
     commands->state->fn.cmd_push_data(commands->command_buffer, &info);
 }
 
-void set_texture_descriptor_heap(CommandBuffer* commands, GpuRange heap) noexcept
+void set_texture_descriptor_heap(CommandBuffer* commands, TextureDescriptorHeap* heap) noexcept
 {
-    assert(commands && commands->state);
+    assert(commands && heap && commands->state == heap->state);
     const VkPhysicalDeviceDescriptorHeapPropertiesEXT& properties = commands->state->heap_properties;
     VkBindHeapInfoEXT bind_info{};
     make_heap_bind_info(
-        heap,
+        gpu_range(heap->storage),
         properties.imageDescriptorAlignment > properties.bufferDescriptorAlignment
             ? properties.imageDescriptorAlignment
             : properties.bufferDescriptorAlignment,
@@ -3346,12 +3433,12 @@ void set_texture_descriptor_heap(CommandBuffer* commands, GpuRange heap) noexcep
     commands->state->fn.cmd_bind_texture_heap(commands->command_buffer, &bind_info);
 }
 
-void set_sampler_descriptor_heap(CommandBuffer* commands, GpuRange heap) noexcept
+void set_sampler_descriptor_heap(CommandBuffer* commands, SamplerDescriptorHeap* heap) noexcept
 {
-    assert(commands && commands->state);
+    assert(commands && heap && commands->state == heap->state);
     const VkPhysicalDeviceDescriptorHeapPropertiesEXT& properties = commands->state->heap_properties;
     VkBindHeapInfoEXT bind_info{};
-    make_heap_bind_info(heap, properties.samplerDescriptorAlignment, properties.minSamplerHeapReservedRange, bind_info);
+    make_heap_bind_info(gpu_range(heap->storage), properties.samplerDescriptorAlignment, properties.minSamplerHeapReservedRange, bind_info);
     commands->state->fn.cmd_bind_sampler_heap(commands->command_buffer, &bind_info);
 }
 
@@ -3468,7 +3555,6 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         .pStencilAttachment = desc.stencil.render_view ? &stencil_attachment : nullptr,
     };
     vkCmdBeginRendering(commands->command_buffer, &rendering_info);
-    commands->suspending = (static_cast<uint32>(flags) & static_cast<uint32>(RenderingFlags::suspending)) != 0;
 
     set_viewport(commands, {.width = static_cast<float>(area_view->width), .height = static_cast<float>(area_view->height)});
     set_scissor(commands, {.width = area_view->width, .height = area_view->height});
@@ -3590,6 +3676,7 @@ void draw_meshlets(CommandBuffer* commands, ByteSpan root, uint32x3 group_count)
 void draw_meshlets_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
 {
     assert(commands && commands->state);
+    assert(commands->state->caps.indirect_mesh_draw);
     assert(root.size <= 256);
     emit_root_data(commands, root);
     const VkDrawIndirect2InfoKHR info{

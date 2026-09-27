@@ -1,6 +1,7 @@
+#include <NoGraphicsAPI/shader.slang>
 #include "task_shader_shared.h"
 
-[[vk::push_constant]] ConstantBuffer<TaskShaderRoot> root;
+GPU_ROOT(TaskShaderRoot, root);
 
 groupshared TaskTestPayload compacted;
 groupshared uint visible_count;

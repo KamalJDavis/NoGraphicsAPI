@@ -4,6 +4,13 @@ add_library(NoGraphicsAPI_example_support STATIC
     common/example_support.cpp
     common/example_support.hpp
 )
+if(APPLE)
+    target_sources(NoGraphicsAPI_example_support PRIVATE common/example_window_macos.mm)
+    target_link_libraries(NoGraphicsAPI_example_support PRIVATE "-framework AppKit" "-framework QuartzCore")
+    target_compile_options(NoGraphicsAPI_example_support PRIVATE -fno-objc-arc)
+else()
+    target_sources(NoGraphicsAPI_example_support PRIVATE common/example_window_win32.cpp)
+endif()
 NoGraphicsAPI_disable_exceptions(NoGraphicsAPI_example_support)
 target_link_libraries(NoGraphicsAPI_example_support PUBLIC NoGraphicsAPI::NoGraphicsAPI)
 target_include_directories(NoGraphicsAPI_example_support PUBLIC common)

@@ -1,7 +1,9 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
-find_dependency(Vulkan 1.4.357)
+if(NOT APPLE)
+    find_dependency(Vulkan 1.4.357)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/NoGraphicsAPITargets.cmake")
 

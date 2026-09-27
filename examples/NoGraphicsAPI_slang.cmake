@@ -1,5 +1,13 @@
 find_program(NOGRAPHICSAPI_SLANGC NAMES slangc REQUIRED)
-find_program(NOGRAPHICSAPI_SPIRV_VAL NAMES spirv-val REQUIRED)
+if(APPLE)
+    find_program(NOGRAPHICSAPI_XCRUN NAMES xcrun REQUIRED)
+    set(NOGRAPHICSAPI_SHADER_EXTENSION metallib CACHE INTERNAL "Native shader artifact extension" FORCE)
+    set(NOGRAPHICSAPI_SLANG_MINIMUM 2026.18.2)
+else()
+    find_program(NOGRAPHICSAPI_SPIRV_VAL NAMES spirv-val REQUIRED)
+    set(NOGRAPHICSAPI_SHADER_EXTENSION spv CACHE INTERNAL "Native shader artifact extension" FORCE)
+    set(NOGRAPHICSAPI_SLANG_MINIMUM 2026.14.1)
+endif()
 
 function(NoGraphicsAPI_require_tool_version program argument name minimum pattern)
     execute_process(
@@ -23,47 +31,56 @@ function(NoGraphicsAPI_require_tool_version program argument name minimum patter
 endfunction()
 
 NoGraphicsAPI_require_tool_version(
-    "${NOGRAPHICSAPI_SLANGC}" -version Slang 2026.13.1
+    "${NOGRAPHICSAPI_SLANGC}" -version Slang ${NOGRAPHICSAPI_SLANG_MINIMUM}
     "([0-9]+\\.[0-9]+(\\.[0-9]+)?)")
-NoGraphicsAPI_require_tool_version(
-    "${NOGRAPHICSAPI_SPIRV_VAL}" --version SPIRV-Tools 2026.3
-    "SPIRV-Tools v([0-9]+\\.[0-9]+)")
+if(NOT APPLE)
+    NoGraphicsAPI_require_tool_version(
+        "${NOGRAPHICSAPI_SPIRV_VAL}" --version SPIRV-Tools 2026.3
+        "SPIRV-Tools v([0-9]+\\.[0-9]+)")
+endif()
 
 function(NoGraphicsAPI_compile_slang output source entry stage)
     cmake_parse_arguments(SLANG "" "" "DEPENDS" ${ARGN})
-    set(options)
-    if(stage STREQUAL "mesh" OR stage STREQUAL "amplification")
-        list(APPEND options -capability spvMeshShadingEXT)
-    endif()
-
     get_filename_component(output_dir "${output}" DIRECTORY)
-    add_custom_command(
-        OUTPUT ${output}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${output_dir}
-        COMMAND ${NOGRAPHICSAPI_SLANGC}
-            ${source}
-            -target spirv
-            -profile spirv_1_5
-            -emit-spirv-directly
-            -fvk-use-entrypoint-name
-            -fvk-use-c-layout
-            -matrix-layout-row-major
-            -capability spvDescriptorHeapEXT
-            -I ${CMAKE_CURRENT_SOURCE_DIR}
-            -I ${PROJECT_SOURCE_DIR}/include
-            -I ${PROJECT_SOURCE_DIR}/utility/include
-            ${options}
-            -entry ${entry}
-            -stage ${stage}
-            -o ${output}
-        COMMAND ${NOGRAPHICSAPI_SPIRV_VAL}
-            --target-env vulkan1.4 --scalar-block-layout ${output}
-        DEPENDS ${source} ${SLANG_DEPENDS}
-            ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/types.h
-            ${PROJECT_SOURCE_DIR}/utility/include/NoGraphicsAPIUtility/shader_types.h
-        VERBATIM
-        COMMENT "Compiling Slang ${stage} shader ${entry}"
-    )
+    set(dependencies ${source} ${SLANG_DEPENDS}
+        ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/types.h
+        ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/shader.slang
+        ${PROJECT_SOURCE_DIR}/utility/include/NoGraphicsAPIUtility/shader_types.h)
+    set(common_options
+        -entry ${entry} -stage ${stage}
+        -fvk-use-c-layout -matrix-layout-row-major
+        -I ${CMAKE_CURRENT_SOURCE_DIR}
+        -I ${PROJECT_SOURCE_DIR}/include
+        -I ${PROJECT_SOURCE_DIR}/utility/include)
+    if(APPLE)
+        add_custom_command(
+            OUTPUT ${output}
+            BYPRODUCTS ${output}.metal ${output}.air
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${output_dir}
+            COMMAND ${NOGRAPHICSAPI_SLANGC} ${source} -target metal -DNOGRAPHICSAPI_METAL
+                ${common_options} -o ${output}.metal
+            COMMAND ${NOGRAPHICSAPI_XCRUN} -sdk macosx metal -std=metal4.0 -c ${output}.metal -o ${output}.air
+            COMMAND ${NOGRAPHICSAPI_XCRUN} -sdk macosx metallib ${output}.air -o ${output}
+            DEPENDS ${dependencies}
+            VERBATIM
+            COMMENT "Compiling Slang ${stage} shader ${entry} to metallib"
+        )
+    else()
+        set(options -capability spvDescriptorHeapEXT)
+        if(stage STREQUAL "mesh" OR stage STREQUAL "amplification")
+            list(APPEND options -capability spvMeshShadingEXT)
+        endif()
+        add_custom_command(
+            OUTPUT ${output}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${output_dir}
+            COMMAND ${NOGRAPHICSAPI_SLANGC} ${source} -target spirv -profile spirv_1_5
+                -emit-spirv-directly -fvk-use-entrypoint-name ${common_options} ${options} -o ${output}
+            COMMAND ${NOGRAPHICSAPI_SPIRV_VAL} --target-env vulkan1.4 --scalar-block-layout ${output}
+            DEPENDS ${dependencies}
+            VERBATIM
+            COMMENT "Compiling and validating Slang ${stage} shader ${entry} to SPIR-V"
+        )
+    endif()
 endfunction()
 
 function(NoGraphicsAPI_add_example target)

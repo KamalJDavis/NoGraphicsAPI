@@ -30,9 +30,23 @@ function(NoGraphicsAPI_disable_exceptions target)
     endif()
 endfunction()
 
-find_package(Vulkan 1.4.357 REQUIRED)
-message(STATUS "Using Vulkan ${Vulkan_VERSION}: ${Vulkan_LIBRARY}")
-message(STATUS "Using Vulkan headers: ${Vulkan_INCLUDE_DIR}")
+if(APPLE)
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0")
+    elseif(CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "26.0")
+        message(FATAL_ERROR "The Metal 4 backend requires macOS or iOS 26 or newer")
+    endif()
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    set(NoGraphicsAPI_backend_source src/NoGraphicsAPIMetal.mm)
+    message(STATUS "Using Metal 4")
+else()
+    find_package(Vulkan 1.4.357 REQUIRED)
+    set(NoGraphicsAPI_backend_source src/NoGraphicsAPI.cpp)
+    message(STATUS "Using Vulkan ${Vulkan_VERSION}: ${Vulkan_LIBRARY}")
+    message(STATUS "Using Vulkan headers: ${Vulkan_INCLUDE_DIR}")
+endif()
 
 add_library(NoGraphicsAPI STATIC
     include/NoGraphicsAPI/types.h
@@ -40,7 +54,7 @@ add_library(NoGraphicsAPI STATIC
     include/NoGraphicsAPI/traits.hpp
     include/NoGraphicsAPI/bit.hpp
     include/NoGraphicsAPI/NoGraphicsAPI.hpp
-    src/NoGraphicsAPI.cpp
+    ${NoGraphicsAPI_backend_source}
 )
 add_library(NoGraphicsAPI::NoGraphicsAPI ALIAS NoGraphicsAPI)
 set_target_properties(NoGraphicsAPI PROPERTIES EXPORT_NAME NoGraphicsAPI)
@@ -50,10 +64,12 @@ target_include_directories(NoGraphicsAPI PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(NoGraphicsAPI
-    PUBLIC Vulkan::Headers
-    PRIVATE Vulkan::Vulkan
-)
+if(APPLE)
+    target_link_libraries(NoGraphicsAPI PRIVATE "-framework Metal" "-framework Foundation" "-framework QuartzCore")
+    target_compile_options(NoGraphicsAPI PRIVATE -fno-objc-arc)
+else()
+    target_link_libraries(NoGraphicsAPI PUBLIC Vulkan::Headers PRIVATE Vulkan::Vulkan)
+endif()
 NoGraphicsAPI_disable_exceptions(NoGraphicsAPI)
 
 if(MSVC)

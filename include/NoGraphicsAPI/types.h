@@ -6,8 +6,8 @@
 #if defined(__MINGW32__)
 #error "NoGraphicsAPI does not support MinGW"
 #endif
-#if defined(_M_ARM64EC) || (!defined(_M_X64) && !defined(__x86_64__))
-#error "NoGraphicsAPI requires an x86-64 target"
+#if defined(_M_ARM64EC) || (!defined(_M_X64) && !defined(__x86_64__) && !(defined(__APPLE__) && defined(__aarch64__)))
+#error "NoGraphicsAPI requires x86-64 or Apple ARM64"
 #endif
 
 typedef signed char int8;

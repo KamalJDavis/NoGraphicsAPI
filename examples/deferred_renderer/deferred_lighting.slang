@@ -1,3 +1,4 @@
+#include <NoGraphicsAPI/shader.slang>
 #include "deferred_lighting_shared.h"
 
 struct FullscreenVertex
@@ -6,7 +7,7 @@ struct FullscreenVertex
     float3 world_ray : TEXCOORD0;
 };
 
-[[vk::push_constant]] ConstantBuffer<DeferredLightingRoot> root;
+GPU_ROOT(DeferredLightingRoot, root);
 
 [shader("vertex")]
 FullscreenVertex vertexMain(uint vertex_index : SV_VertexID)
@@ -28,9 +29,9 @@ FullscreenVertex vertexMain(uint vertex_index : SV_VertexID)
 float4 fragmentMain(FullscreenVertex input) : SV_Target0
 {
     uint texture_base = root.gbuffer_texture_base;
-    Texture2D<float4> albedo_texture = ResourceDescriptorHeap[texture_base + uint(GBufferTexture::albedo)];
-    Texture2D<float4> normal_roughness_texture = ResourceDescriptorHeap[texture_base + uint(GBufferTexture::normal_roughness)];
-    Texture2D<float> depth_texture = ResourceDescriptorHeap[texture_base + uint(GBufferTexture::depth)];
+    Texture2D<float4> albedo_texture = gpu_texture<Texture2D<float4>>(texture_base + uint(GBufferTexture::albedo));
+    Texture2D<float4> normal_roughness_texture = gpu_texture<Texture2D<float4>>(texture_base + uint(GBufferTexture::normal_roughness));
+    Texture2D<float> depth_texture = gpu_texture<Texture2D<float>>(texture_base + uint(GBufferTexture::depth));
 
     int3 location = int3(int2(input.position.xy * root.gbuffer_pixel_scale), 0);
     float depth = depth_texture.Load(location);

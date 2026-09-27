@@ -1,4 +1,5 @@
 #include <NoGraphicsAPI/NoGraphicsAPI.hpp>
+#include "shader_code.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -19,12 +20,6 @@ constexpr uint32 width = segment_count * 8;
 constexpr uint32 height = 8;
 constexpr uint64 pixel_bytes = width * height * 4;
 constexpr uint64 timestamp_bytes = segment_count * 2 * sizeof(uint64);
-
-struct ShaderCode
-{
-    uint32 words[8192];
-    uint32 count = 0;
-};
 
 struct StartGate
 {
@@ -67,21 +62,6 @@ struct Fixture
     uint64 previous_timestamp = ~uint64{0};
     Worker workers[segment_count]{};
 };
-
-bool load_shader(const char* path, ShaderCode& code) noexcept
-{
-    FILE* file = fopen(path, "rb");
-    if (!file) { fprintf(stderr, "Cannot open render continuation shader: %s\n", path); return false; }
-    fseek(file, 0, SEEK_END);
-    const long bytes = ftell(file);
-    rewind(file);
-    if (bytes < 20 || uint64(bytes) > sizeof(code.words) || (bytes & 3)) { fclose(file); return false; }
-    const bool read = fread(code.words, 1, size_t(bytes), file) == size_t(bytes);
-    fclose(file);
-    if (!read || code.words[0] != 0x07230203u) return false;
-    code.count = uint32(bytes) / 4;
-    return true;
-}
 
 void draw_segment(gpu::CommandBuffer* commands, const Worker& worker) noexcept
 {
@@ -176,14 +156,16 @@ bool record_workers(gpu::Span<Worker> workers) noexcept
 
 bool initialize(Fixture& fixture) noexcept
 {
-    ShaderCode vertex{};
-    ShaderCode fragment{};
-    if (!load_shader(NOGRAPHICSAPI_CONTINUATION_VERTEX_SPV, vertex) || !load_shader(NOGRAPHICSAPI_CONTINUATION_FRAGMENT_SPV, fragment)) return false;
+    gpu::Span<byte> vertex = load_test_shader(NOGRAPHICSAPI_CONTINUATION_VERTEX_SPV);
+    gpu::Span<byte> fragment = load_test_shader(NOGRAPHICSAPI_CONTINUATION_FRAGMENT_SPV);
+    if (!vertex.data || !fragment.data) { free(vertex.data); free(fragment.data); return false; }
     fixture.pso = gpu::create_graphics_pso(fixture.device, {
-        .vertex_spirv = {vertex.words, vertex.count},
-        .fragment_spirv = {fragment.words, fragment.count},
+        .vertex = {.code = {vertex.data, vertex.size}, .entry_point = "vertexMain"},
+        .fragment = {.code = {fragment.data, fragment.size}, .entry_point = "fragmentMain"},
         .color_targets = {{.format = gpu::Format::rgba8_unorm}},
     });
+    free(vertex.data);
+    free(fragment.data);
     if (!fixture.pso) return false;
     fixture.readback_pool = gpu::create_command_pool(fixture.device);
     if (!fixture.readback_pool) return false;
@@ -221,7 +203,7 @@ bool render_iteration(Fixture& fixture, uint32 iteration) noexcept
     {
         fixture.workers[index].pso = fixture.pso;
         fixture.workers[index].rendering = &rendering;
-        fixture.workers[index].timestamps = reinterpret_cast<uint64*>(fixture.readback.range.gpu + pixel_bytes) + index * 2;
+        fixture.workers[index].timestamps = reinterpret_cast<uint64*>(fixture.readback.range.cpu + pixel_bytes) + index * 2;
         fixture.workers[index].index = index;
         fixture.workers[index].iteration = iteration;
     }
@@ -249,6 +231,7 @@ bool render_iteration(Fixture& fixture, uint32 iteration) noexcept
     if (iteration >= 4) commands[1] = readback;
     gpu::submit(fixture.device, {.commands = {commands, iteration < 4 ? segment_count + 1 : 2}, .completion = fixture.completion});
     gpu::wait_timeline(fixture.completion);
+    for (uint32 index = 0; index < (iteration < 4 ? segment_count : 1); ++index) gpu::read_timestamps(fixture.workers[index].pool);
     bool valid = true;
     for (uint32 y = 0; y < height; ++y)
         for (uint32 x = 0; x < width; ++x)

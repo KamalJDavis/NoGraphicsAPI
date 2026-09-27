@@ -13,18 +13,6 @@ dependency also worked in isolation; native `vkCmdCopyImageToBuffer2` readback w
 The parallel texture test uses an explicit timeline wait. No driver-specific barrier widening is applied
 by the graphics API.
 
-## NVIDIA 596.99: copy-queue timestamp resolution loses the device
-
-On an RTX 4090, resolving timestamps with `vkCmdCopyQueryPoolResultsToMemoryKHR` on a copy-only queue
-returns `VK_ERROR_DEVICE_LOST`, with or without validation. Timestamp writes without the resolve complete;
-buffer/texture transfers and general/compute-queue timestamp resolution also pass.
-The [Vulkan command contract](https://docs.vulkan.org/refpages/latest/refpages/source/vkCmdCopyQueryPoolResultsToMemoryKHR.html)
-permits transfer-only queues.
-
-Avoid `write_timestamp` on copy-only queues with this driver. No workaround or silent timestamp suppression
-is applied by the library. The regular queue-family tests omit copy-queue markers; reproduce the failure
-explicitly with `build-msvc/tests/Debug/test_queue_families.exe --copy-timestamps`.
-
 ## NVIDIA 596.99: core Vulkan 1.3 concurrent copies lose the device
 
 On Windows with an RTX 4090, buffer copies submitted to separate general, compute, and copy queues from
@@ -41,3 +29,24 @@ That mode adds only the debug/validation instance extensions, not device extensi
 This points to an NVIDIA driver issue independent of the library implementation, not a confirmed
 NoGraphicsAPI defect. The root cause is not vendor-confirmed, and no workaround is established.
 See the [standalone repro and test results](repro-queue-device-lost.md).
+
+## Metal 4 / macOS 26.6.2: render timestamps leave counter entries unwritten
+
+Observed on Apple M3 Max with macOS 26.6.2 and Xcode 27. Ten native render-encoder timestamp writes
+interleaved with draws return five nonzero entries and five zeros after GPU completion. The failure
+reproduces with and without Metal API validation, without a preceding validation error.
+
+The standalone repro does not link or call NoGraphicsAPI and uses inline MSL, without Slang. It uses
+one ordinary render pass, so suspended/resumed rendering is not required. Counter retrieval follows
+Apple's documented shared-event completion sequence.
+
+This points to an Apple Metal driver/runtime issue; the root cause is not vendor-confirmed. There is
+no established workaround for timestamps inside rendering. Outside-render command-buffer timestamps
+work in the tested configuration and are used by bad_sdf. The library does not substitute timings or
+hide the failing `test_render_continuation`. See the [standalone repro and test results](repro-metal-render-timestamps.md).
+
+## MetalTools validation limitations
+
+MetalTools has separate limitations with concurrent sampler lifetime changes, placed-resource
+residency, and indirect mesh instrumentation. See [Metal validation](metal-validation.md#metaltools-limitations)
+for reproductions and tool-specific handling.

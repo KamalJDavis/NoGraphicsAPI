@@ -1,13 +1,15 @@
 # NoGraphicsAPI
 
-NoGraphicsAPI is an experimental C++20 graphics library implementing the ideas in Sebastian Aaltonen's
-[*No Graphics API*](https://www.sebastianaaltonen.com/blog/no-graphics-api) with Vulkan 1.4 and Slang.
+NoGraphicsAPI is a C++20 graphics library designed for the latest **Metal 4** devices and **Vulkan 1.4** devices with
+**`VK_EXT_descriptor_heap`**, **`VK_KHR_device_address_commands`**, and **`VK_EXT_mesh_shader`**.
+It implements the ideas in Sebastian Aaltonen's [*No Graphics API*](https://www.sebastianaaltonen.com/blog/no-graphics-api)
+with GPU pointers, descriptor heaps, and shared Slang shaders.
 
 The goal is to make GPU programming feel more like working with ordinary memory and data structures:
 GPU pointers for data, heap indices for textures, and a small argument structure for each draw or dispatch.
 
-The implemented backend is Vulkan, with windowed examples on Windows x86-64 and headless builds on
-other supported x86-64 platforms. This is a prototype: expect API changes and please report bugs.
+Metal 4 and Vulkan are supported native backends. CMake selects Metal on macOS/iOS and Vulkan on Windows/Linux.
+Both use the same C++ API and Slang sources. Windows and macOS include windowed examples; Linux currently supports headless use.
 
 ## What changes from classic rendering?
 
@@ -69,27 +71,88 @@ and shares them across graphics stages, rather than passing separate GPU root po
 See the [design comparison](docs/no-graphics-api-comparison.md) for the remaining differences and
 the [shader guide](docs/slang.md) for complete examples.
 
+## Descriptor heaps
+
+Descriptor heaps expose application-owned slots through opaque texture and sampler heap types:
+
+```cpp
+gpu::TextureDescriptorHeap* textures = gpu::create_texture_descriptor_heap(device, 4096);
+gpu::SamplerDescriptorHeap* samplers = gpu::create_sampler_descriptor_heap(device, 64);
+gpu::write_texture_descriptor(textures, 17, texture, gpu::TextureDescriptorType::sampled);
+gpu::write_sampler_descriptor(samplers, 3, {.address_u = gpu::AddressMode::clamp_to_edge});
+gpu::set_texture_descriptor_heap(commands, textures);
+gpu::set_sampler_descriptor_heap(commands, samplers);
+```
+
+The shared shader uses `gpu_texture<Texture2D<float4>>(17)` and `gpu_sampler(3)` from
+`<NoGraphicsAPI/shader.slang>`. Indexed copy functions support overlapping slot ranges. Modify or
+reuse a slot only after its previous GPU users have completed; destroy heaps after their final use.
+
+Vulkan descriptor storage remains CPU-mapped coherent GPU memory internally. Metal texture descriptors
+live in an `MTLTextureViewPool`, whose descriptor bytes are not exposed by Metal. Its shader selects
+`baseResourceID + index` directly, without an ID lookup table. Sampler heaps use a mapped array of
+64-bit resource IDs. The common API exposes indices and write/copy operations rather than a fake
+mapped texture-descriptor buffer. Ordinary `GpuHeap::range.cpu` and `range.gpu` remain public.
+See [the Metal data model](docs/metal-support.md#application-owned-descriptor-heaps).
+
 ## Threading
 
-There are no internal mutexes. The application must externally synchronize each queue and command pool.
-The recommended setup is one command pool per in-flight frame per recording thread.
-Independent pools can record concurrently, and work can be submitted to multiple GPU queues.
+The application must externally synchronize each queue and command pool. Use one command pool per
+in-flight frame per recording thread. Independent pools can record concurrently, and work can be
+submitted to multiple GPU queues.
+
+Metal supports up to 64 live `GpuHeap` allocations. GPU-address lookups read an atomic snapshot without
+mutexes or atomic read-modify-write operations. Native residency mutations are serialized internally;
+address-index updates and timestamp-slot allocation use atomics. Disjoint descriptor writes/copies and ordinary queue submission take no
+internal mutex. Copy sources must remain stable. GPU shader validation also serializes MetalTools'
+residency enumeration. See [concurrency validation](docs/metal-validation.md#concurrency-and-lifetime).
 
 The utility library's `BumpAllocator::allocate_atomic()` supports concurrent bump allocation using relaxed atomic operations.
 
 ## Hardware requirements
 
-The library targets little-endian x86-64. Examples using the utility math library require AVX2 and FMA.
-The GPU needs Vulkan 1.4 plus recent extensions. Three important extensions behind this API are:
+### Metal 4
 
-- [`VK_EXT_descriptor_heap`][descriptor-heap] — required; application-owned descriptor heaps.
-- [`VK_KHR_device_address_commands`][address-commands] — required; commands operate on GPU addresses.
-- [`VK_KHR_unified_image_layouts`][unified-layouts] — optional; efficient texture access using a single image layout.
+The Metal backend supports macOS 26+, iOS 26+, and iPadOS 26+ on Apple GPU family 7 or newer with Metal 4.
+Native Apple builds use ARM64 and NEON utility math. Device creation checks both GPU families.
 
-Descriptor heaps and device-address commands are brand-new 2026 extensions. Unified image layouts
-was introduced in 2025. Missing required extensions are the main reason for unsupported GPUs below;
-the remaining [requirements](docs/vulkan-support.md#vulkan-feature-surface) are more widely supported
-on recent GPUs. Vulkan 1.4 support alone is not sufficient.
+| Platform | Supported devices |
+| --- | --- |
+| Mac | Apple silicon Macs, including M1 and M2 and later M-series chips |
+| iPhone | A14 Bionic or newer, including iPhone 12 and later |
+| iPad Pro | Models introduced in 2021 or later (M1 and newer) |
+| iPad Air | Models introduced in 2020 or later (A14 and newer) |
+| iPad mini | Models introduced in 2021 or later (A15 and newer) |
+| iPad | Models introduced in 2022 or later (A14 and newer) |
+
+See [Apple's Metal 4 device list](https://support.apple.com/en-us/102894) and
+[GPU family tables](https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf).
+Intel Macs and older Apple GPUs are outside this baseline. tvOS, visionOS, and Simulator builds are not supported targets.
+
+Direct task/mesh draws work throughout the baseline. Native indirect mesh draws require Apple9 or newer
+(A17 Pro / M3 or newer), exposed by `DeviceCaps::indirect_mesh_draw`. M1/M2 applications can use direct task draws
+whose shaders select mesh work from GPU data. BC texture compression is a separate capability; query it before choosing BC assets.
+Applications can impose stricter hardware and memory requirements than the library.
+
+Metal builds require Xcode 26+ and its Metal compiler. Shared Metal shaders require stock Slang 2026.18.2+.
+The backend is exercised on M3 Max and iPhone 15 Pro; see [Metal implementation](docs/metal-support.md) and
+[validation coverage and driver limitations](docs/metal-validation.md). Support for the wider baseline does not imply every model has been hardware-tested.
+
+### Vulkan 1.4
+
+The Vulkan backend targets little-endian x86-64; utility math requires AVX2 and FMA.
+Vulkan 1.4 alone is insufficient. Required extensions include:
+
+- [`VK_EXT_descriptor_heap`][descriptor-heap] — application-owned descriptor heaps.
+- [`VK_KHR_device_address_commands`][address-commands] — commands operating on GPU addresses.
+- [`VK_EXT_mesh_shader`][mesh-shader] — task and mesh shaders.
+- [`VK_KHR_shader_untyped_pointers`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_shader_untyped_pointers.html) — descriptor-heap shader support.
+
+[`VK_KHR_unified_image_layouts`][unified-layouts] is optional and makes the backend's common image layout efficient.
+See the [Vulkan implementation](docs/vulkan-support.md) for the complete feature contract.
+
+Missing required extensions are the main reason for unsupported GPUs below; the remaining
+[requirements](docs/vulkan-support.md#vulkan-feature-surface) are more widely supported on recent GPUs.
 
 The table preserves the driver reports checked on **5 September 2026**. These are compatibility
 snapshots, not a live driver list. The checked Windows packages were
@@ -124,6 +187,29 @@ on the reported Linux/SteamOS targets.
 
 See [known driver issues](docs/known-driver-issues.md) for observed problems and workarounds.
 
+## macOS installation and quick start
+
+Install Xcode 26+ with its Metal compiler, CMake, and Slang 2026.18.2+. Build the examples and tests:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_SYSROOT=macosx -DNOGRAPHICSAPI_BUILD_EXAMPLES=ON \
+  -DNOGRAPHICSAPI_BUILD_TESTS=ON -DNOGRAPHICSAPI_SLANGC=/path/to/slangc
+cmake --build build
+ctest --test-dir build --output-on-failure
+build/examples/triangle/example_triangle
+```
+
+Examples use native AppKit windows with `CAMetalLayer`. The shader helper emits precompiled Metal
+libraries on macOS and validated SPIR-V on Vulkan. See [validation limitations](docs/metal-validation.md)
+for the known render-timestamp test failure and MetalTools diagnostics. `ShaderStage` supplies bytes, an entry point,
+and compiled workgroup dimensions; see [the shared shader ABI](docs/slang.md).
+
+The library and utilities also cross-compile for iOS 26 ARM64 with `CMAKE_SYSTEM_NAME=iOS`,
+`CMAKE_OSX_SYSROOT=iphoneos`, and `CMAKE_OSX_ARCHITECTURES=arm64`. Keep examples and tests disabled;
+their window adapters and test runners target the desktop. iOS applications supply their UIKit lifecycle
+and `CAMetalLayer`, and compile metallibs for the `iphoneos` SDK. The backend executes in bad_sdf on
+iPhone 15 Pro; M1/M2 iPad hardware remains unverified.
+
 ## Windows installation and quick start
 
 1. Install [Visual Studio 2022](https://visualstudio.microsoft.com/vs/older-downloads/) with the
@@ -132,7 +218,7 @@ See [known driver issues](docs/known-driver-issues.md) for observed problems and
 2. Install [CMake 3.24+](https://cmake.org/download/) and make `cmake` available on `PATH`.
 3. Install the [Vulkan SDK 1.4.357+](https://vulkan.lunarg.com/sdk/home). Shader validation requires
    SPIRV-Tools 2026.3+; make the SDK's `Bin` directory, containing `spirv-val.exe`, available on `PATH`.
-4. Use Slang 2026.13.1+ from the Vulkan SDK, or download a [standalone Windows x64 release](https://github.com/shader-slang/slang/releases),
+4. Use Slang 2026.14.1+ from the Vulkan SDK, or download a [standalone Windows x64 release](https://github.com/shader-slang/slang/releases),
    extract it, and add its `bin` directory to `PATH`.
 5. Install a GPU driver meeting the hardware requirements above. The Vulkan SDK does not replace
    the GPU driver.
@@ -178,10 +264,12 @@ The executables are under `build-msvc/examples/<example>/Release` when using the
 ## Documentation
 
 - [Comparison with *No Graphics API*](docs/no-graphics-api-comparison.md)
-- [Vulkan support and behavior](docs/vulkan-support.md)
+- [Vulkan implementation](docs/vulkan-support.md)
+- [Metal 4 implementation](docs/metal-support.md)
 - [Slang shaders and root ABI](docs/slang.md)
 - [Public API](include/NoGraphicsAPI/NoGraphicsAPI.hpp)
-- [Metal porting plan — not implemented](docs/metal-porting.md)
+- [Metal validation and limitations](docs/metal-validation.md)
+- [Building and integration](docs/building.md)
 
 ## License
 
@@ -189,6 +277,7 @@ NoGraphicsAPI and NoGraphicsAPIUtility use the [MIT License](LICENSE).
 See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled assets and dependencies.
 
 [descriptor-heap]: https://www.khronos.org/blog/vulkan-introduces-roadmap-2026-and-new-descriptor-heap-extension
+[mesh-shader]: https://docs.vulkan.org/refpages/latest/refpages/source/VK_EXT_mesh_shader.html
 [address-commands]: https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_device_address_commands.html
 [unified-layouts]: https://www.khronos.org/blog/so-long-image-layouts-simplifying-vulkan-synchronisation
 [rdna2-rebar]: https://vulkan.gpuinfo.org/displayreport.php?id=42800

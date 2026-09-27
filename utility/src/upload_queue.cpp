@@ -81,12 +81,14 @@ void UploadQueue::destroy() noexcept
 void UploadQueue::reclaim() noexcept
 {
     State& state = state_;
+    assert(!state.in_callback);
     if (!state.retirement_count) return;
     const uint64 completed = timeline_completed_value(state.completion.semaphore);
     while (state.retirement_count && state.batches[state.retirement_first].value <= completed)
     {
         Batch& batch = state.batches[state.retirement_first];
         state.tail = batch.end;
+        read_timestamps(batch.pool);
         reset_command_pool(batch.pool);
         state.retirement_first = (state.retirement_first + 1) % state.max_pending_batches;
         --state.retirement_count;
@@ -190,9 +192,9 @@ void UploadQueue::end_compute() noexcept
     ++state_.operation_count;
 }
 
-void UploadQueue::write_timestamp(uint64* gpu_destination) noexcept
+void UploadQueue::write_timestamp(uint64* cpu_destination) noexcept
 {
-    gpu::write_timestamp(begin(), gpu_destination);
+    gpu::write_timestamp(begin(), cpu_destination);
 }
 
 TimelinePoint UploadQueue::flush() noexcept
