@@ -49,22 +49,30 @@ struct RootArguments
     Vertex* vertices;
     Material* material;
     float4x4 transform;
+    uint32 texture_index;
 };
 ```
 
-Fill it with GPU addresses and pass it to a draw:
+Fill it with GPU addresses, a transform and a texture-heap index, then pass it to a draw:
 
 ```cpp
 RootArguments root{
     .vertices = vertex_memory.gpu,
     .material = material_memory.gpu,
     .transform = transform,
+    .texture_index = texture_index,
 };
 gpu::draw(commands, root, vertex_count);
 ```
 
-The shader reads `root.vertices[vertex_id]` and follows `root.material` directly. Larger data structures
-remain behind pointers; there is no buffer-binding step for either field.
+With `<NoGraphicsAPI/shader.slang>`, the shader accesses the same data directly:
+
+```slang
+GPU_ROOT(RootArguments, root);
+Vertex vertex = root.vertices[vertex_id];
+Material material = *root.material;
+Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
+```
 
 One deliberate difference from the blog: this implementation copies small root arguments (up to 256 bytes) per command
 and shares them across graphics stages, rather than passing separate GPU root pointers for each stage.
