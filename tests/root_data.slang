@@ -9,6 +9,8 @@ static RootData root = roots[0];
 static RootData* root = pointer.address;
 #elif defined(ROOT_DATA_PUSH)
 [[vk::push_constant]] ConstantBuffer<RootData> root;
+#elif defined(ROOT_DATA_ALIGNMENT)
+GPU_ROOT(RootData, root, ROOT_DATA_ALIGNMENT);
 #else
 GPU_ROOT(RootData, root);
 #endif

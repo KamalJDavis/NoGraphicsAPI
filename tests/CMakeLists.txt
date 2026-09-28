@@ -250,18 +250,23 @@ if(APPLE)
 endif()
 
 set(root_data_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/root_data.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
+set(root_aligned_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/root_data_aligned.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
 set(root_generate_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/root_data_generate.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
 NoGraphicsAPI_compile_slang(${root_data_code} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang computeMain compute
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
+NoGraphicsAPI_compile_slang(${root_aligned_code} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang computeMain compute
+    DEFINES ROOT_DATA_ALIGNMENT=16 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
 NoGraphicsAPI_compile_slang(${root_generate_code} ${CMAKE_CURRENT_SOURCE_DIR}/root_data_generate.slang computeMain compute
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_generate_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
-add_executable(test_root_data root_data_test.cpp ${root_data_code} ${root_generate_code})
+add_executable(test_root_data root_data_test.cpp ${root_data_code} ${root_aligned_code} ${root_generate_code})
 NoGraphicsAPI_disable_exceptions(test_root_data)
 target_link_libraries(test_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::allocators)
 target_compile_definitions(test_root_data PRIVATE NOGRAPHICSAPI_ROOT_DATA_PATH="${root_data_code}"
     NOGRAPHICSAPI_ROOT_GENERATE_PATH="${root_generate_code}")
 add_test(NAME test_root_data COMMAND test_root_data)
-set_tests_properties(test_root_data PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+add_test(NAME test_root_data_aligned COMMAND test_root_data ${root_aligned_code})
+set_tests_properties(test_root_data test_root_data_aligned PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
 
 if(NOT APPLE)
     set(root_benchmark_shaders)
@@ -276,6 +281,22 @@ if(NOT APPLE)
             NoGraphicsAPI_compile_slang(${output} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang ${entry} compute
                 DEFINES ROOT_DATA_${mode_define} OPTIONS -O3 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
             list(APPEND root_benchmark_shaders ${output})
+        endforeach()
+    endforeach()
+    foreach(mode IN ITEMS ssbo physical)
+        string(TOUPPER ${mode} mode_define)
+        foreach(alignment IN ITEMS 4 16)
+            foreach(bytes IN ITEMS 64 256)
+                set(entry computeMain)
+                if(bytes EQUAL 64)
+                    set(entry smallMain)
+                endif()
+                set(output ${CMAKE_CURRENT_BINARY_DIR}/root-benchmark/${mode}_aligned${alignment}-${bytes}.spv)
+                NoGraphicsAPI_compile_slang(${output} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang ${entry} compute
+                    DEFINES NOGRAPHICSAPI_ROOT_${mode_define} ROOT_DATA_ALIGNMENT=${alignment}
+                    OPTIONS -O3 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
+                list(APPEND root_benchmark_shaders ${output})
+            endforeach()
         endforeach()
     endforeach()
     add_executable(benchmark_root_data EXCLUDE_FROM_ALL root_data_benchmark.cpp ${root_benchmark_shaders})

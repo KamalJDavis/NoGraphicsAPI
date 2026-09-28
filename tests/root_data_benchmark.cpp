@@ -31,11 +31,9 @@ int main(int argc, char** argv)
     const gpu::DeviceCaps& caps = gpu::get_device_caps(device);
     if (!caps.timestamp_period_ns) return 1;
     printf("GPU: %s\n", caps.device_name);
-    constexpr uint32 modes = 9;
-    const char* names[modes] = {"uniform_user_bump_direct", "structured_user_bump_direct", "physical_user_bump_direct",
-        "uniform_gpu_pointer", "structured_gpu_pointer", "physical_gpu_pointer",
-        "uniform_user_atomic_direct", "structured_user_atomic_direct", "physical_user_atomic_direct"};
-    const char* shaders[modes] = {"uniform", "structured", "physical", "uniform", "structured", "physical", "uniform", "structured", "physical"};
+    constexpr uint32 shader_modes = 7, modes = shader_modes * 3;
+    const char* shaders[shader_modes] = {"uniform", "structured", "physical", "ssbo_aligned4", "ssbo_aligned16", "physical_aligned4", "physical_aligned16"};
+    const char* allocations[3] = {"user_bump_direct", "gpu_pointer", "user_atomic_direct"};
     constexpr uint32 samples = 61, warmup = 16;
     const gpu::GpuHeap roots = gpu::create_gpu_heap(device, 1024 * sizeof(RootData));
     const gpu::GpuHeap device_roots = gpu::create_gpu_heap(device, roots.range.size, gpu::MemoryType::gpu_only);
@@ -71,8 +69,8 @@ int main(int argc, char** argv)
         for (uint32 size_index = 0; size_index < 2; ++size_index)
         {
             const uint32 root_size = size_index ? 256 : 64;
-            gpu::PSO* psos[modes]{};
-            for (uint32 mode = 0; mode < modes; ++mode)
+            gpu::PSO* psos[shader_modes]{};
+            for (uint32 mode = 0; mode < shader_modes; ++mode)
             {
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/%s-%u.spv", argv[1], shaders[mode], root_size);
@@ -89,18 +87,18 @@ int main(int argc, char** argv)
                 {
                     const uint32 mode = (round + ordinal) % modes;
                     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
-                    gpu::bind_pso(commands, psos[mode]);
+                    gpu::bind_pso(commands, psos[mode % shader_modes]);
                     uint64 begin = 0, end = 0;
                     gpu::write_timestamp(commands, &begin);
                     arena.reset();
                     const uint64 cpu_begin = nanoseconds();
                     for (uint32 i = 0; i < draws; ++i)
                     {
-                        if (mode >= 3 && mode < 6)
+                        if (mode / shader_modes == 1)
                             gpu::dispatch(commands, device_roots.range.gpu + i * sizeof(RootData), {.x = groups, .y = 1, .z = 1});
                         else
                         {
-                            const gpu::GpuCpuRange<byte> root = mode < 3 ? arena.allocate(root_size) : arena.allocate_atomic(root_size);
+                            const gpu::GpuCpuRange<byte> root = mode < shader_modes ? arena.allocate(root_size) : arena.allocate_atomic(root_size);
                             RootData* data = reinterpret_cast<RootData*>(root.cpu);
                             data->output = reinterpret_cast<uint32*>(output.range.gpu);
                             data->output_index = i * lanes;
@@ -133,7 +131,7 @@ int main(int argc, char** argv)
                             for (uint32 sample = 0; sample < 64; ++sample)
                             {
                                 const uint32 lane = sample * (lanes - 1) / 63;
-                                const uint32 seed = mode >= 3 && mode < 6 ? i : round * 1024 + i;
+                                const uint32 seed = mode / shader_modes == 1 ? i : round * 1024 + i;
                                 uint32 expected = seed + lane;
                                 for (uint32 j = 0; j < (size_index ? 60u : 12u); ++j) expected = (expected * 33u) ^ (seed * 7 + j);
                                 if (actual[i * lanes + lane] != expected) valid = false;
@@ -151,10 +149,11 @@ int main(int argc, char** argv)
                 }
                 qsort(cpu_samples, samples, sizeof(double), compare_double);
                 qsort(gpu_samples, samples, sizeof(double), compare_double);
-                printf("%s,%u,%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", workload ? "16x8192groups" : "1024x1group", root_size, names[mode],
+                printf("%s,%u,%s_%s,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n", workload ? "16x8192groups" : "1024x1group", root_size,
+                    shaders[mode % shader_modes], allocations[mode / shader_modes],
                     cpu_samples[30], cpu_samples[6], cpu_samples[54], gpu_samples[30], gpu_samples[6], gpu_samples[54]);
-                gpu::destroy_pso(psos[mode]);
             }
+            for (uint32 mode = 0; mode < shader_modes; ++mode) gpu::destroy_pso(psos[mode]);
         }
     }
     gpu::wait_idle(device);

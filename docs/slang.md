@@ -56,6 +56,33 @@ additional pointers inside the root can be selected by GPU work.
 `GPU_ROOT` preserves the shared C++ layout, including vectors, matrices and pointers, without adding
 backend fields. Plain Metal `ConstantBuffer<Type>` can use different alignment.
 
+The optional third argument declares the root address alignment in bytes; it defaults to four:
+
+```slang
+GPU_ROOT(ExampleRoot, root, 16);
+```
+
+Use a power of two at least four and satisfy both that promise and the type's natural alignment.
+This does not change field offsets or allocate memory. The draw/dispatch API still requires a
+16-byte-aligned root address, so its callers can specify 16 explicitly.
+
+Vulkan keeps the uniform-buffer binding by default; the argument does not alter that path. For
+comparison, `-DNOGRAPHICSAPI_ROOT_SSBO` selects a structured-buffer binding and
+`-DNOGRAPHICSAPI_ROOT_PHYSICAL` selects a typed pointer in the same eight-byte push payload.
+SSBO requests `loadAligned<N>`; the physical variant uses it for hints above four bytes.
+Slang 2026.14.1 and 2026.18.2 currently discard
+the alignment operand for descriptor-backed SSBOs. Physical loads retain it, reduced as needed for
+member offsets. The physical path's default four uses natural member alignment, including eight
+bytes for pointer fields, to satisfy Vulkan's scalar-alignment requirement.
+
+Metal keeps an ordinary typed load for the two-argument default; explicit alignment hints use
+`__builtin_assume_aligned` on the generated packed storage pointer.
+The root remains in the `device` address space. `constant` can enable uniform-register preloading,
+but Slang's `ConstantBuffer` lowering currently changes the shared vector/matrix layout, including
+when `ScalarDataLayout` is requested. The alignment hint preserves that layout; it does not request
+constant-address-space access or guarantee vector loads. Source generation is checked with Slang
+2026.18.2; native compilation and performance of this new hint still need validation on a Mac.
+
 Recompile Vulkan shaders when adopting this ABI: the push payload is now eight bytes, not the root
 structure itself. The binding uses `VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`; no buffer descriptor is allocated.
 
@@ -105,3 +132,5 @@ belongs to the build system; the API performs no runtime SPIR-V translation. The
 - [Slang target interoperation](https://shader-slang.org/slang/user-guide/a1-04-interop.html)
 - [Slang Metal target](https://github.com/shader-slang/slang/blob/master/docs/user-guide/a2-02-metal-target-specific.md)
 - [SPV_EXT_descriptor_heap](https://github.khronos.org/SPIRV-Registry/extensions/EXT/SPV_EXT_descriptor_heap.html)
+- [Slang aligned loads](https://docs.shader-slang.org/en/latest/external/core-module-reference/global-decls/loadaligned-4.html)
+- [Apple constant-address-space guidance](https://developer.apple.com/videos/play/wwdc2020/10632/)

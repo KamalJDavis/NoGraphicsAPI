@@ -1,10 +1,22 @@
 #pragma once
 
+#define GPU_ROOT_SELECT(_1, _2, _3, macro, ...) macro
+#define GPU_ROOT(...) GPU_ROOT_SELECT(__VA_ARGS__, GPU_ROOT_IMPL, GPU_ROOT_DEFAULT)(__VA_ARGS__)
+
 #ifdef NOGRAPHICSAPI_METAL
 
 // StructuredBuffer preserves the C layout of vectors, matrices and GPU pointers. Metal ConstantBuffer does not.
-#define GPU_ROOT(type, name) [[vk::binding(0)]] StructuredBuffer<type> name##_storage : register(t0); static type name = name##_storage[0]
+#define GPU_ROOT_DEFAULT(type, name) [[vk::binding(0)]] StructuredBuffer<type> name##_storage : register(t0); static type name = name##_storage[0]
+#define GPU_ROOT_IMPL(type, name, alignment) \
+    [[vk::binding(0)]] StructuredBuffer<type> name##_storage : register(t0); \
+    static type name = gpu_root_aligned_storage(name##_storage, alignment)[0]
 #define GPU_ADDRESS(value) __getAddress(value)
+
+[ForceInline]
+StructuredBuffer<T> gpu_root_aligned_storage<T>(StructuredBuffer<T> storage, constexpr int alignment)
+{
+    __intrinsic_asm "(($TR)__builtin_assume_aligned($0, $1))";
+}
 
 [[vk::binding(1)]] ConstantBuffer<uint64_t> gpu_texture_pool_base : register(b1);
 
@@ -39,7 +51,20 @@ T gpu_sampler<T : IOpaqueDescriptor = SamplerState>(uint index)
 
 #else
 
-#define GPU_ROOT(type, name) [[vk::binding(0, 0)]] ConstantBuffer<type> name
+#define GPU_ROOT_DEFAULT(type, name) GPU_ROOT_IMPL(type, name, 4)
+#if defined(NOGRAPHICSAPI_ROOT_PHYSICAL)
+struct GPURootPointer<T> { T* address; };
+// The default preserves natural member alignment, including eight-byte GPU pointers.
+#define GPU_ROOT_IMPL(type, name, alignment) \
+    [[vk::push_constant]] ConstantBuffer<GPURootPointer<type>> name##_storage; \
+    static type name = (alignment) == 4 ? *name##_storage.address : loadAligned<alignment>(name##_storage.address)
+#elif defined(NOGRAPHICSAPI_ROOT_SSBO)
+#define GPU_ROOT_IMPL(type, name, alignment) \
+    [[vk::binding(0, 0)]] StructuredBuffer<type> name##_storage; \
+    static type name = loadAligned<alignment>(__getStructuredBufferElementPtr(name##_storage, 0))
+#else
+#define GPU_ROOT_IMPL(type, name, alignment) [[vk::binding(0, 0)]] ConstantBuffer<type> name
+#endif
 #define GPU_ADDRESS(value) (&(value))
 
 [ForceInline]

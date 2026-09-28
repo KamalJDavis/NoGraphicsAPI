@@ -16,13 +16,13 @@ static gpu::PSO* load_compute(gpu::Device* device, const char* path, uint32 thre
     return pso;
 }
 
-int main()
+int main(int argc, char** argv)
 {
     gpu::DeviceInit init = gpu::create_device();
     if (init.error == gpu::Error::unsupported) return 77;
     if (init.error != gpu::Error::none) return 1;
     gpu::Device* device = init.device;
-    gpu::PSO* consume = load_compute(device, NOGRAPHICSAPI_ROOT_DATA_PATH, 64);
+    gpu::PSO* consume = load_compute(device, argc > 1 ? argv[1] : NOGRAPHICSAPI_ROOT_DATA_PATH, 64);
     gpu::PSO* generate = load_compute(device, NOGRAPHICSAPI_ROOT_GENERATE_PATH, 1);
     if (!consume || !generate) return 1;
     gpu::CommandPool* pool = gpu::create_command_pool(device);
