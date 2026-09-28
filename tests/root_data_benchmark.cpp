@@ -32,9 +32,9 @@ int main(int argc, char** argv)
     if (!caps.timestamp_period_ns) return 1;
     printf("GPU: %s\n", caps.device_name);
     constexpr uint32 modes = 9;
-    const char* names[modes] = {"uniform_user_bump", "structured_user_bump", "physical_user_bump",
+    const char* names[modes] = {"uniform_user_bump_direct", "structured_user_bump_direct", "physical_user_bump_direct",
         "uniform_gpu_pointer", "structured_gpu_pointer", "physical_gpu_pointer",
-        "uniform_user_atomic", "structured_user_atomic", "physical_user_atomic"};
+        "uniform_user_atomic_direct", "structured_user_atomic_direct", "physical_user_atomic_direct"};
     const char* shaders[modes] = {"uniform", "structured", "physical", "uniform", "structured", "physical", "uniform", "structured", "physical"};
     constexpr uint32 samples = 61, warmup = 16;
     const gpu::GpuHeap roots = gpu::create_gpu_heap(device, 1024 * sizeof(RootData));
@@ -42,7 +42,6 @@ int main(int argc, char** argv)
     const gpu::GpuHeap output = gpu::create_gpu_heap(device, 16 * 8192 * 64 * sizeof(uint32), gpu::MemoryType::gpu_only);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, output.range.size, gpu::MemoryType::readback);
     gpu::BumpAllocator arena(roots.range);
-    RootData* cpu_roots = static_cast<RootData*>(malloc(size_t(roots.range.size)));
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
     uint64 submission = 0;
@@ -55,10 +54,13 @@ int main(int argc, char** argv)
         const uint32 lanes = groups * 64;
         for (uint32 i = 0; i < draws; ++i)
         {
-            cpu_roots[i] = {.output = reinterpret_cast<uint32*>(output.range.gpu), .output_index = i * lanes, .seed = i};
-            for (uint32 j = 0; j < 60; ++j) cpu_roots[i].values[j] = i * 7 + j;
+            RootData* root = reinterpret_cast<RootData*>(roots.range.cpu) + i;
+            root->output = reinterpret_cast<uint32*>(output.range.gpu);
+            root->output_index = i * lanes;
+            root->seed = i;
+            for (uint32 j = 0; j < 60; ++j) root->values[j] = i * 7 + j;
         }
-        memcpy(roots.range.cpu, cpu_roots, size_t(draws) * sizeof(RootData));
+        // Only the pre-existing GPU-only-root reference uses this untimed upload.
         gpu::CommandBuffer* upload = gpu::begin_commands(pool);
         gpu::copy_memory(upload, gpu::gpu_range(roots), gpu::gpu_range(device_roots));
         gpu::barrier(upload, gpu::Stage::transfer, gpu::Access::transfer_write, gpu::Stage::compute, gpu::Access::shader_read);
@@ -99,7 +101,11 @@ int main(int argc, char** argv)
                         else
                         {
                             const gpu::GpuCpuRange<byte> root = mode < 3 ? arena.allocate(root_size) : arena.allocate_atomic(root_size);
-                            memcpy(root.cpu, &cpu_roots[i], root_size);
+                            RootData* data = reinterpret_cast<RootData*>(root.cpu);
+                            data->output = reinterpret_cast<uint32*>(output.range.gpu);
+                            data->output_index = i * lanes;
+                            data->seed = round * 1024 + i;
+                            for (uint32 j = 0; j < (size_index ? 60u : 12u); ++j) data->values[j] = (round * 1024 + i) * 7 + j;
                             gpu::dispatch(commands, root.gpu, {.x = groups, .y = 1, .z = 1});
                         }
                     }
@@ -127,8 +133,9 @@ int main(int argc, char** argv)
                             for (uint32 sample = 0; sample < 64; ++sample)
                             {
                                 const uint32 lane = sample * (lanes - 1) / 63;
-                                uint32 expected = i + lane;
-                                for (uint32 j = 0; j < (size_index ? 60u : 12u); ++j) expected = (expected * 33u) ^ (i * 7 + j);
+                                const uint32 seed = mode >= 3 && mode < 6 ? i : round * 1024 + i;
+                                uint32 expected = seed + lane;
+                                for (uint32 j = 0; j < (size_index ? 60u : 12u); ++j) expected = (expected * 33u) ^ (seed * 7 + j);
                                 if (actual[i * lanes + lane] != expected) valid = false;
                             }
                     }
@@ -158,7 +165,6 @@ int main(int argc, char** argv)
     gpu::destroy_gpu_heap(device_roots);
     gpu::destroy_gpu_heap(roots);
     gpu::destroy_device(device);
-    free(cpu_roots);
     printf("Readback: %s\n", valid ? "PASS" : "FAIL");
     return valid ? 0 : 1;
 }
