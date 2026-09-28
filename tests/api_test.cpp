@@ -58,11 +58,6 @@ concept RawRootCommandApi = requires(T* commands, const void* root, size_t root_
     gpu::draw_meshlets_indirect(commands, root, root_size, range);
 };
 
-template<typename Root>
-concept TypedPointerRawDraw = requires(gpu::CommandBuffer* commands, const Root* root, size_t root_size) {
-    gpu::draw(commands, root, root_size, 3u);
-};
-
 template<typename T>
 concept NullRootCommandApi = requires(T* commands, gpu::GpuRange range) {
     gpu::draw(commands, nullptr, 0, 3u);
@@ -132,15 +127,14 @@ static_assert(__is_trivially_copyable(ApiRoot) && sizeof(ApiRoot) % 4 == 0);
 static_assert(!HasImplicitRootDraw<gpu::CommandBuffer>);
 static_assert(!HasImplicitRootDispatch<gpu::CommandBuffer>);
 static_assert(!HasImplicitRootMeshDraw<gpu::CommandBuffer>);
-static_assert(RootCommandApi<ApiRoot>);
+static_assert(RootCommandApi<ApiRoot*> && RootCommandApi<const ApiRoot*> && RootCommandApi<const void*>);
+static_assert(!RootCommandApi<ApiRoot>);
 static_assert(!RootCommandApi<uint32>);
-static_assert(!RootCommandApi<uint32[4]>);
-static_assert(!RootCommandApi<decltype(nullptr)>);
+static_assert(RootCommandApi<decltype(nullptr)>);
 static_assert(!RootCommandApi<volatile ApiRoot>);
 static_assert(!RootCommandApi<OddSizedRoot>);
 static_assert(!RootCommandApi<NonTrivialRoot>);
 static_assert(!RawRootCommandApi<gpu::CommandBuffer>);
-static_assert(!TypedPointerRawDraw<ApiRoot>);
 static_assert(!NullRootCommandApi<gpu::CommandBuffer>);
 static_assert(EmptyRootCommandApi<gpu::CommandBuffer>);
 
@@ -507,7 +501,7 @@ using CreateTextureFunction = gpu::Texture* (*)(gpu::CommandBuffer*, const gpu::
 using CreateDeviceFunction = gpu::DeviceInit (*)(const gpu::DeviceDesc&) noexcept;
 using GetDrawableExtentFunction = gpu::uint32x2 (*)(gpu::Device*) noexcept;
 using AcquireFunction = gpu::SwapchainFrame (*)(gpu::CommandBuffer*) noexcept;
-using CreateCommandPoolFunction = gpu::CommandPool* (*)(gpu::Device*, uint32, uint64) noexcept;
+using CreateCommandPoolFunction = gpu::CommandPool* (*)(gpu::Device*, uint32) noexcept;
 using CommandPoolFunction = void (*)(gpu::CommandPool*) noexcept;
 using BeginCommandsFunction = gpu::CommandBuffer* (*)(gpu::CommandPool*) noexcept;
 using EndCommandsFunction = void (*)(gpu::CommandBuffer*) noexcept;
@@ -527,12 +521,12 @@ using CopyTextureToMemoryFunction = void (*)(gpu::CommandBuffer*, gpu::Texture*,
 using WriteTextureDescriptorFunction = void (*)(gpu::TextureDescriptorHeap*, uint32, const gpu::Texture*, gpu::TextureDescriptorType,
                                                const gpu::TextureDescriptorDesc&) noexcept;
 using WriteSamplerDescriptorFunction = void (*)(gpu::SamplerDescriptorHeap*, uint32, const gpu::SamplerDesc&) noexcept;
-using DrawFunction = void (*)(gpu::CommandBuffer*, gpu::ByteSpan, uint32, uint32, uint32, uint32) noexcept;
-using DrawIndexedFunction = void (*)(gpu::CommandBuffer*, gpu::ByteSpan, gpu::GpuRange, gpu::IndexType, uint32, uint32, uint32, int32, uint32) noexcept;
-using DrawIndirectFunction = void (*)(gpu::CommandBuffer*, gpu::ByteSpan, gpu::GpuRange, uint32, uint32) noexcept;
-using DrawIndexedIndirectFunction = void (*)(gpu::CommandBuffer*, gpu::ByteSpan, gpu::GpuRange, gpu::IndexType, gpu::GpuRange, uint32, uint32) noexcept;
-using DispatchFunction = void (*)(gpu::CommandBuffer*, gpu::ByteSpan, gpu::uint32x3) noexcept;
-using DispatchIndirectFunction = void (*)(gpu::CommandBuffer*, gpu::ByteSpan, gpu::GpuRange) noexcept;
+using DrawFunction = void (*)(gpu::CommandBuffer*, const void*, uint32, uint32, uint32, uint32) noexcept;
+using DrawIndexedFunction = void (*)(gpu::CommandBuffer*, const void*, gpu::GpuRange, gpu::IndexType, uint32, uint32, uint32, int32, uint32) noexcept;
+using DrawIndirectFunction = void (*)(gpu::CommandBuffer*, const void*, gpu::GpuRange, uint32, uint32) noexcept;
+using DrawIndexedIndirectFunction = void (*)(gpu::CommandBuffer*, const void*, gpu::GpuRange, gpu::IndexType, gpu::GpuRange, uint32, uint32) noexcept;
+using DispatchFunction = void (*)(gpu::CommandBuffer*, const void*, gpu::uint32x3) noexcept;
+using DispatchIndirectFunction = void (*)(gpu::CommandBuffer*, const void*, gpu::GpuRange) noexcept;
 static_assert(gpu::detail::is_same_v<decltype(&gpu::create_gpu_heap), CreateGpuHeapFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::destroy_gpu_heap), DestroyGpuHeapFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::create_texture_heap), CreateTextureHeapFunction>);
@@ -543,7 +537,6 @@ static_assert(gpu::detail::is_same_v<decltype(&gpu::create_device), CreateDevice
 static_assert(gpu::detail::is_same_v<decltype(&gpu::get_drawable_extent), GetDrawableExtentFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::acquire), AcquireFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::create_command_pool), CreateCommandPoolFunction>);
-static_assert(gpu::detail::is_same_v<decltype(&gpu::set_root_pointer), void (*)(gpu::CommandBuffer*, const void*) noexcept>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::destroy_command_pool), CommandPoolFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::reset_command_pool), CommandPoolFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::read_timestamps), CommandPoolFunction>);
@@ -574,7 +567,7 @@ static_assert(gpu::detail::is_same_v<decltype(&gpu::draw_meshlets_indirect), Dra
 static_assert(__is_constructible(CommandBatch, std::initializer_list<gpu::CommandBuffer*>));
 
 [[maybe_unused]] void compile_api_surface(gpu::Device* device, gpu::Texture* texture, gpu::RenderView* render_view, gpu::PSO* pso,
-                                         gpu::CommandBuffer* commands, gpu::TimelineSemaphore* semaphore, const ApiRoot& root, void* native_window)
+                                         gpu::CommandBuffer* commands, gpu::TimelineSemaphore* semaphore, const ApiRoot* root, void* native_window)
 {
     gpu::DeviceInit device_init = gpu::create_device();
     gpu::DeviceInit window_device_init = gpu::create_device({

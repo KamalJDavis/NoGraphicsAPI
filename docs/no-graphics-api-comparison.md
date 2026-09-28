@@ -3,14 +3,14 @@
 Sebastian Aaltonen's [*No Graphics API*](https://www.sebastianaaltonen.com/blog/no-graphics-api)
 proposes GPU pointers, application-owned descriptor heaps and synchronization without resource lists.
 NoGraphicsAPI implements that model with Vulkan 1.4 and Metal 4. One GPU root is shared across
-graphics stages; applications can bind it directly or supply a small CPU structure for the library to copy.
+graphics stages; each draw or dispatch takes an application-owned GPU pointer directly.
 
 | Area | NoGraphicsAPI |
 | --- | --- |
 | Linear data | Application-partitioned GPU heaps expose 64-bit pointers; there are no public buffer objects. |
 | Vertex data | Shaders fetch through pointers; PSOs have no vertex layout. |
 | Textures and samplers | Separate application-owned indexed heaps; native descriptor bytes remain private. |
-| Root data | One GPU root shared across active graphics stages; optional CPU copies of at most 256 bytes. |
+| Root data | One GPU pointer passed to each draw/dispatch, shared across active graphics stages; no backend allocation or copy. |
 | Pipelines | No application binding layout; rasterization, blending and attachment formats remain in PSOs. |
 | Dynamic state | Viewport, scissor and exposed depth/stencil state are command state. |
 | Barriers | Global stage/access dependencies, without resource or image-layout lists. |
@@ -38,15 +38,13 @@ slot reuse and referenced texture lifetimes.
 
 ## Root ABI and pipelines
 
-Each draw or dispatch copies one `ByteSpan` of CPU data; the typed overload accepts a trivially
-copyable structure. Pointer fields reference GPU storage, and descriptor fields hold indices.
-The CPU root need only survive the call, while referenced resources survive GPU completion.
+Each draw or dispatch takes a GPU pointer to an application-owned root. Pointer fields reference GPU
+storage, and descriptor fields hold indices. The root and referenced resources survive GPU completion.
+Mapped frame storage and `BumpAllocator::allocate<T>()` provide transient roots without per-command driver allocation.
 
-Roots use shared C layout and row-major matrices. CPU copies fit 256 bytes and consume fixed
-command-pool storage; Vulkan pushes their 64-bit address and Metal updates its argument table.
-`set_root_pointer` binds application-owned GPU storage, including roots written by earlier GPU work.
-Empty bytes retain the binding. All active graphics stages share one root; separate stage roots and
-GPU-generated binding commands are not exposed.
+Roots use shared C layout and row-major matrices. Vulkan pushes their 64-bit address and Metal updates
+its argument table. GPU work can write root contents before later commands consume them. All active
+graphics stages share one root; separate stage roots and GPU-generated binding commands are not exposed.
 
 `ShaderStage` contains precompiled bytes, an entry name and compute/task/mesh threadgroup dimensions.
 Vulkan accepts SPIR-V; Metal accepts metallib. Both use the same Slang source and root structures.

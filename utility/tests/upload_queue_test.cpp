@@ -439,7 +439,7 @@ static void order_queue(Fixture& fixture, uint32 queue_index)
 #if defined(NOGRAPHICSAPI_UPLOAD_QUEUE_SPV_PATH)
 static void run_compute_callbacks(Fixture& fixture, uint32 queue_index = 0)
 {
-    fixture.ring = UploadQueue(fixture.device, 272, queue_index);
+    fixture.ring = UploadQueue(fixture.device, 288, queue_index);
     order_queue(fixture, queue_index);
     uint32 initial[16]{};
     for (uint32 index = 0; index < 16; ++index) initial[index] = index * 23 + 7;
@@ -448,16 +448,17 @@ static void run_compute_callbacks(Fixture& fixture, uint32 queue_index = 0)
     uint32 callbacks = 0;
     for (uint32 iteration = 0; iteration < 2; ++iteration)
     {
-        fixture.ring.upload_with_compute(sizeof(initial), [&](CommandBuffer* commands, GpuCpuRange<byte> staging) noexcept
+        fixture.ring.upload_with_compute(sizeof(initial) + 32, [&](CommandBuffer* commands, GpuCpuRange<byte> staging) noexcept
         {
             ++callbacks;
-            check(staging.size == sizeof(initial) && !(reinterpret_cast<uintptr>(staging.cpu) & 15)
+            check(staging.size == sizeof(initial) + 32 && !(reinterpret_cast<uintptr>(staging.cpu) & 15)
                 && !(reinterpret_cast<uintptr>(staging.gpu) & 15), "callback receives the requested aligned staging range");
             for (uint32 index = 0; index < 16; ++index) reinterpret_cast<uint32*>(staging.cpu)[index] = iteration * 31 + index + 1;
             bind_pso(commands, fixture.compute);
-            dispatch(commands, UploadQueueRoot{
+            *reinterpret_cast<UploadQueueRoot*>(staging.cpu + sizeof(initial)) = {
                 .source = reinterpret_cast<uint32*>(staging.gpu), .destination = reinterpret_cast<uint32*>(fixture.buffer.range.gpu), .count = 16,
-            }, {.x = 1, .y = 1, .z = 1});
+            };
+            dispatch(commands, staging.gpu + sizeof(initial), {.x = 1, .y = 1, .z = 1});
         });
         check(callbacks == iteration + 1, "compute callback executes synchronously exactly once");
         for (uint32 index = 0; index < 16; ++index) initial[index] += iteration * 31 + index + 1;
@@ -476,14 +477,15 @@ static void run_compute_callbacks(Fixture& fixture, uint32 queue_index = 0)
     const uint64 submissions = fixture.ring.stats().submissions;
     for (uint32 iteration = 0; iteration < 5; ++iteration)
     {
-        fixture.ring.upload_with_compute(sizeof(values), [&](CommandBuffer* commands, GpuCpuRange<byte> staging) noexcept
+        fixture.ring.upload_with_compute(sizeof(values) + 32, [&](CommandBuffer* commands, GpuCpuRange<byte> staging) noexcept
         {
             ++callbacks;
             for (uint32 index = 0; index < 64; ++index) reinterpret_cast<uint32*>(staging.cpu)[index] = iteration * 37 + index * 5 + 11;
             bind_pso(commands, fixture.compute);
-            dispatch(commands, UploadQueueRoot{
+            *reinterpret_cast<UploadQueueRoot*>(staging.cpu + sizeof(values)) = {
                 .source = reinterpret_cast<uint32*>(staging.gpu), .destination = reinterpret_cast<uint32*>(fixture.buffer.range.gpu + 1024), .count = 64,
-            }, {.x = 1, .y = 1, .z = 1});
+            };
+            dispatch(commands, staging.gpu + sizeof(values), {.x = 1, .y = 1, .z = 1});
         });
         for (uint32 index = 0; index < 64; ++index) values[index] += iteration * 37 + index * 5 + 11;
     }
@@ -491,7 +493,7 @@ static void run_compute_callbacks(Fixture& fixture, uint32 queue_index = 0)
     check(callbacks == 7 && fixture.ring.stats().submissions == submissions + 5,
         "full staging reservations flush before exposing each callback's command buffer");
     read_results(fixture);
-    check(fixture.ring.stats().peak_bytes <= 272, "compute callbacks preserve bounded ring storage across wraps");
+    check(fixture.ring.stats().peak_bytes <= 288, "compute callbacks preserve bounded ring storage across wraps");
 }
 #endif
 

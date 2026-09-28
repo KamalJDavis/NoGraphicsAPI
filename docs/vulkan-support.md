@@ -152,23 +152,15 @@ with its submission timeline.
 
 ## Root ABI
 
-Each draw, mesh draw, and dispatch accepts one `ByteSpan`; the typed convenience path accepts a
-trivially copyable root structure. The backend copies those bytes into a mapped, device-local command-pool
-arena, then pushes only its 64-bit GPU address with `vkCmdPushDataEXT`. The structure may combine:
+Each draw, mesh draw, and dispatch accepts a GPU root pointer. The backend pushes that eight-byte
+address with `vkCmdPushDataEXT`; it neither allocates storage nor copies the root structure.
+One root is shared by all active graphics stages. Roots may contain typed GPU pointers, texture and
+sampler indices, and scalar, vector and matrix values.
 
-- typed GPU pointers;
-- 32-bit texture and sampler indices;
-- ordinary scalar, vector, and matrix values.
-
-CPU roots are at most 256 bytes. Their copies consume 16-byte-aligned arena ranges shared by every
-buffer recorded from the pool. `create_command_pool` reserves a configurable 4 MiB by default;
-recording never grows it. Reset reclaims it after completion. Pools needing only memory copies or application-owned
-roots can reserve zero bytes. One root is shared by all active graphics stages.
-
-`set_root_pointer` binds application-owned GPU memory without a copy. Empty root bytes retain the
-binding, while a nonempty CPU root replaces it. GPU shaders can produce root contents for later
-draws/dispatches; synchronize writes with `Access::shader_read` at the consuming stages. That access
-includes uniform-buffer reads. Root allocations and referenced resources retain their normal GPU lifetime.
+Application-owned roots must be 16-byte aligned and remain live until GPU use finishes. For transient
+CPU-written roots, use a `BumpAllocator` over mapped storage protected by a frame timeline. GPU shaders
+can produce roots for later draws/dispatches; synchronize writes with `Access::shader_read` at the
+consuming stages. That access includes uniform-buffer reads. See [the root contract](slang.md#root-and-pointer-layout).
 
 Pipelines are created with `VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT` and a null pipeline layout.
 The backend never records push constants, descriptor sets, descriptor buffers, or push descriptors,

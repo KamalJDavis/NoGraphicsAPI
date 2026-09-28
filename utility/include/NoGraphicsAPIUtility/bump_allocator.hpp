@@ -28,7 +28,7 @@ public:
     [[nodiscard]] GpuCpuRange<byte> allocate_atomic(uint64 byte_size) noexcept;
 
     template<typename T>
-    [[nodiscard]] GpuCpuRange<T> allocate(uint64 element_count) noexcept
+    [[nodiscard]] GpuCpuRange<T> allocate(uint64 element_count = 1) noexcept
     {
         static_assert(alignof(T) <= alignment);
         const GpuCpuRange<byte> allocation = allocate(element_count * sizeof(T));
@@ -36,7 +36,7 @@ public:
     }
 
     template<typename T>
-    [[nodiscard]] GpuCpuRange<T> allocate_atomic(uint64 element_count) noexcept
+    [[nodiscard]] GpuCpuRange<T> allocate_atomic(uint64 element_count = 1) noexcept
     {
         static_assert(alignof(T) <= alignment);
         const GpuCpuRange<byte> allocation = allocate_atomic(element_count * sizeof(T));

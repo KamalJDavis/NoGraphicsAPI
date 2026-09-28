@@ -1,4 +1,5 @@
 #include "root_data_shared.h"
+#include <NoGraphicsAPIUtility/bump_allocator.hpp>
 #include "shader_code.h"
 #include <time.h>
 
@@ -30,20 +31,17 @@ int main(int argc, char** argv)
     const gpu::DeviceCaps& caps = gpu::get_device_caps(device);
     if (!caps.timestamp_period_ns) return 1;
     printf("GPU: %s\n", caps.device_name);
-#ifdef ROOT_DATA_LEGACY
-    constexpr uint32 modes = 1;
-    const char* names[modes] = {"push_data"};
-    const char* shaders[modes] = {"push"};
-#else
-    constexpr uint32 modes = 6;
-    const char* names[modes] = {"uniform_bump", "structured_bump", "physical_bump", "uniform_gpu", "structured_gpu", "physical_gpu"};
-    const char* shaders[modes] = {"uniform", "structured", "physical", "uniform", "structured", "physical"};
-#endif
+    constexpr uint32 modes = 9;
+    const char* names[modes] = {"uniform_user_bump", "structured_user_bump", "physical_user_bump",
+        "uniform_gpu_pointer", "structured_gpu_pointer", "physical_gpu_pointer",
+        "uniform_user_atomic", "structured_user_atomic", "physical_user_atomic"};
+    const char* shaders[modes] = {"uniform", "structured", "physical", "uniform", "structured", "physical", "uniform", "structured", "physical"};
     constexpr uint32 samples = 61, warmup = 16;
     const gpu::GpuHeap roots = gpu::create_gpu_heap(device, 1024 * sizeof(RootData));
     const gpu::GpuHeap device_roots = gpu::create_gpu_heap(device, roots.range.size, gpu::MemoryType::gpu_only);
     const gpu::GpuHeap output = gpu::create_gpu_heap(device, 16 * 8192 * 64 * sizeof(uint32), gpu::MemoryType::gpu_only);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, output.range.size, gpu::MemoryType::readback);
+    gpu::BumpAllocator arena(roots.range);
     RootData* cpu_roots = static_cast<RootData*>(malloc(size_t(roots.range.size)));
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
@@ -92,18 +90,18 @@ int main(int argc, char** argv)
                     gpu::bind_pso(commands, psos[mode]);
                     uint64 begin = 0, end = 0;
                     gpu::write_timestamp(commands, &begin);
+                    arena.reset();
                     const uint64 cpu_begin = nanoseconds();
                     for (uint32 i = 0; i < draws; ++i)
                     {
-#ifndef ROOT_DATA_LEGACY
-                        if (mode >= 3)
-                        {
-                            gpu::set_root_pointer(commands, device_roots.range.gpu + i * sizeof(RootData));
-                            gpu::dispatch(commands, {}, {.x = groups, .y = 1, .z = 1});
-                        }
+                        if (mode >= 3 && mode < 6)
+                            gpu::dispatch(commands, device_roots.range.gpu + i * sizeof(RootData), {.x = groups, .y = 1, .z = 1});
                         else
-#endif
-                            gpu::dispatch(commands, {&cpu_roots[i], root_size}, {.x = groups, .y = 1, .z = 1});
+                        {
+                            const gpu::GpuCpuRange<byte> root = mode < 3 ? arena.allocate(root_size) : arena.allocate_atomic(root_size);
+                            memcpy(root.cpu, &cpu_roots[i], root_size);
+                            gpu::dispatch(commands, root.gpu, {.x = groups, .y = 1, .z = 1});
+                        }
                     }
                     const uint64 cpu_end = nanoseconds();
                     gpu::write_timestamp(commands, &end);

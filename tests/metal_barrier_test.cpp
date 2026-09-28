@@ -55,7 +55,7 @@ int main(int argc, const char* const* argv)
     gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
     gpu::RenderView* view = gpu::create_render_view(color);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
-    const gpu::GpuHeap upload = gpu::create_gpu_heap(device, 64);
+    const gpu::GpuHeap upload = gpu::create_gpu_heap(device, 64 + 2 * sizeof(MetalBarrierRoot));
     const gpu::GpuHeap data = gpu::create_gpu_heap(device, 64, gpu::MemoryType::gpu_only);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, 512, gpu::MemoryType::readback);
     bool valid = true;
@@ -69,7 +69,7 @@ int main(int argc, const char* const* argv)
         memset(upload.range.cpu, 0, 64);
         reinterpret_cast<uint32*>(upload.range.cpu)[0] = 71 + mode;
         memset(readback.range.cpu, 0xa5, 512);
-        gpu::copy_memory(commands, gpu::gpu_range(upload), gpu::gpu_range(data));
+        gpu::copy_memory(commands, {.gpu = upload.range.gpu, .size = 64}, gpu::gpu_range(data));
         gpu::barrier(commands, gpu::Stage::transfer, gpu::Access::transfer_write,
             gpu::Stage::compute | gpu::Stage::vertex | gpu::Stage::mesh, gpu::Access::shader_read | gpu::Access::shader_write);
         MetalBarrierRoot root{
@@ -80,8 +80,9 @@ int main(int argc, const char* const* argv)
             .value = 123 + mode,
             .clipped = mode >> 2,
         };
+        memcpy(upload.range.cpu + (root.overwrite ? 112 : 64), &root, sizeof(root));
         gpu::bind_pso(commands, compute);
-        gpu::dispatch(commands, root, {.x = 1, .y = 1, .z = 1});
+        gpu::dispatch(commands, upload.range.gpu + (root.overwrite ? 112 : 64), {.x = 1, .y = 1, .z = 1});
         if (timestamps) gpu::write_timestamp(commands, reinterpret_cast<uint64*>(readback.range.cpu + 384));
         gpu::Stage consumers = gpu::Stage::fragment;
         gpu::Access reads = gpu::Access::shader_read;
@@ -92,18 +93,19 @@ int main(int argc, const char* const* argv)
         gpu::bind_pso(commands, (mode & 3) == 3 ? mesh : graphics);
         switch (mode & 3)
         {
-        case 0: gpu::draw(commands, root, 3); break;
-        case 1: gpu::draw_indexed(commands, root, {.gpu = root.indices, .size = 12}, gpu::IndexType::uint32, 3); break;
-        case 2: gpu::draw_indirect(commands, root, {.gpu = root.arguments, .size = 16}); break;
-        case 3: gpu::draw_meshlets(commands, root, {.x = 1, .y = 1, .z = 1}); break;
+        case 0: gpu::draw(commands, upload.range.gpu + 64, 3); break;
+        case 1: gpu::draw_indexed(commands, upload.range.gpu + 64, {.gpu = root.indices, .size = 12}, gpu::IndexType::uint32, 3); break;
+        case 2: gpu::draw_indirect(commands, upload.range.gpu + 64, {.gpu = root.arguments, .size = 16}); break;
+        case 3: gpu::draw_meshlets(commands, upload.range.gpu + 64, {.x = 1, .y = 1, .z = 1}); break;
         }
         gpu::end_render_pass(commands);
         // Fragment's execution scope includes earlier geometry reads, including draws that produce no fragments.
         gpu::barrier(commands, gpu::Stage::fragment, gpu::Access::none, gpu::Stage::compute, gpu::Access::shader_write);
         root.value = 211 + mode;
         root.overwrite = 1;
+        memcpy(upload.range.cpu + (root.overwrite ? 112 : 64), &root, sizeof(root));
         gpu::bind_pso(commands, compute);
-        gpu::dispatch(commands, root, {.x = 1, .y = 1, .z = 1});
+        gpu::dispatch(commands, upload.range.gpu + (root.overwrite ? 112 : 64), {.x = 1, .y = 1, .z = 1});
         gpu::barrier(commands, gpu::Stage::vertex | gpu::Stage::mesh | gpu::Stage::compute | gpu::Stage::color_output,
             gpu::Access::shader_write | gpu::Access::color_write, gpu::Stage::transfer, gpu::Access::transfer_read);
         gpu::copy_texture_to_memory(commands, color, {.gpu = readback.range.gpu, .size = 256});

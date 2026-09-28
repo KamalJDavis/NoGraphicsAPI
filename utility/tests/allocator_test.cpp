@@ -38,8 +38,8 @@ static_assert(__is_aggregate(gpu::HeapAllocation<gpu::byte>) && __is_standard_la
 static_assert(gpu::detail::is_same_v<decltype(declval<gpu::GpuCpuRange<uint32>>().cpu), uint32*>);
 static_assert(gpu::detail::is_same_v<decltype(declval<gpu::GpuCpuRange<uint32>>().gpu), uint32*>);
 static_assert(gpu::detail::is_same_v<decltype(declval<gpu::HeapAllocator&>().allocate<uint32>(1)), gpu::HeapAllocation<uint32>>);
-static_assert(gpu::detail::is_same_v<decltype(declval<gpu::BumpAllocator&>().allocate<uint32>(1)), gpu::GpuCpuRange<uint32>>);
-static_assert(gpu::detail::is_same_v<decltype(declval<gpu::BumpAllocator&>().allocate_atomic<uint32>(1)), gpu::GpuCpuRange<uint32>>);
+static_assert(gpu::detail::is_same_v<decltype(declval<gpu::BumpAllocator&>().allocate<uint32>()), gpu::GpuCpuRange<uint32>>);
+static_assert(gpu::detail::is_same_v<decltype(declval<gpu::BumpAllocator&>().allocate_atomic<uint32>()), gpu::GpuCpuRange<uint32>>);
 static_assert(!__is_constructible(gpu::FixedFunction<128>, const gpu::FixedFunction<128>&));
 static_assert(!__is_constructible(gpu::FixedFunction<128>, gpu::FixedFunction<128>&&));
 

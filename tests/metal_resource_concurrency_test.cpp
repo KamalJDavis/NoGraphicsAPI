@@ -347,7 +347,7 @@ void update_descriptors(void* argument) noexcept
     DescriptorWorker& worker = *static_cast<DescriptorWorker*>(argument);
     gpu::CommandPool* pool = gpu::create_command_pool(worker.device, worker.queue);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(worker.device);
-    const gpu::GpuHeap upload = gpu::create_gpu_heap(worker.device, texture_bytes * 2);
+    const gpu::GpuHeap upload = gpu::create_gpu_heap(worker.device, texture_bytes * 2 + sizeof(QueueFamilyRoot));
     const gpu::GpuHeap readback = gpu::create_gpu_heap(worker.device, texture_bytes * 2 + 32, gpu::MemoryType::readback);
     for (uint32 i = 0; i < texture_bytes * 2 / 4; ++i)
         reinterpret_cast<uint32*>(upload.range.cpu)[i] = 0xff000000u | ((worker.queue + 1) << 16) | (i * 31u & 0xffffu);
@@ -371,10 +371,12 @@ void update_descriptors(void* argument) noexcept
         gpu::barrier(commands, gpu::Stage::transfer, gpu::Access::transfer_write, gpu::Stage::compute, gpu::Access::shader_read);
         gpu::set_texture_descriptor_heap(commands, worker.descriptors);
         gpu::bind_pso(commands, worker.pso);
-        gpu::dispatch(commands, QueueFamilyRoot{
+        *reinterpret_cast<QueueFamilyRoot*>(upload.range.cpu + texture_bytes * 2) = {
             .source = reinterpret_cast<uint32*>(upload.range.gpu + source * texture_bytes),
             .destination = reinterpret_cast<uint32*>(readback.range.gpu), .source_texture = slot + 2, .destination_texture = slot + 3,
-        }, {.x = (queue_test_width + 7) / 8, .y = (queue_test_height + 7) / 8, .z = 1});
+        };
+        gpu::dispatch(commands, upload.range.gpu + texture_bytes * 2,
+            {.x = (queue_test_width + 7) / 8, .y = (queue_test_height + 7) / 8, .z = 1});
         gpu::barrier(commands, gpu::Stage::compute, gpu::Access::shader_write, gpu::Stage::transfer, gpu::Access::transfer_read);
         gpu::copy_texture_to_memory(commands, textures[source + 2], {.gpu = readback.range.gpu + texture_bytes + 16, .size = texture_bytes});
         gpu::barrier(commands, gpu::Stage::compute | gpu::Stage::transfer, gpu::Access::shader_write | gpu::Access::transfer_write,

@@ -58,7 +58,8 @@ static bool test_shader_abi(gpu::Device* device)
     gpu::set_texture_descriptor_heap(commands, views);
     gpu::set_sampler_descriptor_heap(commands, samplers);
     gpu::bind_pso(commands, pso);
-    gpu::dispatch(commands, root, {.x = 1, .y = 1, .z = 1});
+    memcpy(upload.range.cpu + 32, &root, sizeof(root));
+    gpu::dispatch(commands, upload.range.gpu + 32, {.x = 1, .y = 1, .z = 1});
     gpu::barrier(commands, gpu::Stage::compute, gpu::Access::shader_write, gpu::Stage::transfer, gpu::Access::transfer_read);
     gpu::copy_memory(commands, gpu::gpu_range(output), gpu::gpu_range(readback));
     gpu::end_commands(commands);

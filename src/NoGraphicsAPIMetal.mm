@@ -283,8 +283,6 @@ struct Queue
 struct CommandPool
 {
     Device* device = nullptr;
-    id<MTLBuffer> roots = nil;
-    uint64 root_offset = 0;
     QueueKind kind = QueueKind::general;
     CommandBuffer* first = nullptr;
     CommandBuffer* last = nullptr;
@@ -1217,18 +1215,12 @@ void destroy_pso(PSO* pso) noexcept
     }
 }
 
-CommandPool* create_command_pool(Device* device, uint32 queue_index, uint64 root_capacity) noexcept
+CommandPool* create_command_pool(Device* device, uint32 queue_index) noexcept
 {
     @autoreleasepool
     {
         assert(queue_index < device->caps.queue_count);
         CommandPool* pool = new CommandPool{.device = device, .kind = device->queues[queue_index].kind};
-        if (root_capacity)
-        {
-            pool->roots = [device->metal newBufferWithLength:root_capacity options:MTLResourceStorageModeShared];
-            if (!pool->roots) { report_error("root storage", nil); delete pool; return nullptr; }
-            add_resident(device, pool->roots);
-        }
         depth_state(pool, {});
         for (uint32 compare = 0; compare < 8; ++compare)
             for (uint32 write = 0; write < 2; ++write)
@@ -1254,7 +1246,6 @@ void reset_command_pool(CommandPool* pool) noexcept
             for (NativeCommandBuffer* native = commands->native_buffers; native; native = native->next) [native->allocator reset];
         }
         pool->next_buffer = pool->first;
-        pool->root_offset = 0;
     }
 }
 
@@ -1277,8 +1268,6 @@ void destroy_command_pool(CommandPool* pool) noexcept
             delete chunk;
             chunk = next;
         }
-        if (pool->roots) remove_resident(pool->device, pool->roots);
-        [pool->roots release];
         delete pool;
     }
 }
@@ -1757,30 +1746,17 @@ void bind_pso(CommandBuffer* commands, const PSO* pso) noexcept
     }
 }
 
-void set_root_pointer(CommandBuffer* commands, const void* gpu_root) noexcept
-{
-    assert(commands && gpu_root && (reinterpret_cast<uintptr>(gpu_root) & 15u) == 0);
-    [commands->arguments setAddress:reinterpret_cast<uintptr>(gpu_root) atIndex:0];
-}
-
 namespace
 {
-void root_data(CommandBuffer* commands, ByteSpan root)
+void root_data(CommandBuffer* commands, const void* root)
 {
-    assert(root.size <= 256);
-    if (root.size)
-    {
-        CommandPool* pool = commands->pool;
-        const uint64 size = align_up(root.size, 16);
-        assert(root.data && pool->root_offset + size <= pool->roots.length && "command pool root arena exhausted");
-        memcpy(static_cast<byte*>(pool->roots.contents) + pool->root_offset, root.data, root.size);
-        set_root_pointer(commands, reinterpret_cast<const void*>(pool->roots.gpuAddress + pool->root_offset));
-        pool->root_offset += size;
-    }
+    if (!root) return;
+    assert((reinterpret_cast<uintptr>(root) & 15u) == 0);
+    [commands->arguments setAddress:reinterpret_cast<uintptr>(root) atIndex:0];
 }
 }
 
-void draw(CommandBuffer* commands, ByteSpan root, uint32 vertex_count, uint32 instance_count, uint32 first_vertex, uint32 first_instance) noexcept
+void draw(CommandBuffer* commands, const void* root, uint32 vertex_count, uint32 instance_count, uint32 first_vertex, uint32 first_instance) noexcept
 {
     @autoreleasepool
     {
@@ -1791,7 +1767,7 @@ void draw(CommandBuffer* commands, ByteSpan root, uint32 vertex_count, uint32 in
     }
 }
 
-void draw_indexed(CommandBuffer* commands, ByteSpan root, GpuRange indices, IndexType type, uint32 index_count, uint32 instance_count,
+void draw_indexed(CommandBuffer* commands, const void* root, GpuRange indices, IndexType type, uint32 index_count, uint32 instance_count,
                   uint32 first_index, int32 vertex_offset, uint32 first_instance) noexcept
 {
     @autoreleasepool
@@ -1806,7 +1782,7 @@ void draw_indexed(CommandBuffer* commands, ByteSpan root, GpuRange indices, Inde
     }
 }
 
-void draw_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
+void draw_indirect(CommandBuffer* commands, const void* root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
 {
     @autoreleasepool
     {
@@ -1818,7 +1794,7 @@ void draw_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, u
     }
 }
 
-void draw_indexed_indirect(CommandBuffer* commands, ByteSpan root, GpuRange indices, IndexType type, GpuRange arguments, uint32 draw_count,
+void draw_indexed_indirect(CommandBuffer* commands, const void* root, GpuRange indices, IndexType type, GpuRange arguments, uint32 draw_count,
                            uint32 stride) noexcept
 {
     @autoreleasepool
@@ -1833,7 +1809,7 @@ void draw_indexed_indirect(CommandBuffer* commands, ByteSpan root, GpuRange indi
     }
 }
 
-void dispatch(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noexcept
+void dispatch(CommandBuffer* commands, const void* root, uint32x3 group_count) noexcept
 {
     @autoreleasepool
     {
@@ -1843,7 +1819,7 @@ void dispatch(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noex
     }
 }
 
-void dispatch_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments) noexcept
+void dispatch_indirect(CommandBuffer* commands, const void* root, GpuRange arguments) noexcept
 {
     @autoreleasepool
     {
@@ -1853,7 +1829,7 @@ void dispatch_indirect(CommandBuffer* commands, ByteSpan root, GpuRange argument
     }
 }
 
-void draw_meshlets(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noexcept
+void draw_meshlets(CommandBuffer* commands, const void* root, uint32x3 group_count) noexcept
 {
     @autoreleasepool
     {
@@ -1864,7 +1840,7 @@ void draw_meshlets(CommandBuffer* commands, ByteSpan root, uint32x3 group_count)
     }
 }
 
-void draw_meshlets_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
+void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
 {
     @autoreleasepool
     {

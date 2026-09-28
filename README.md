@@ -6,7 +6,7 @@ It implements the ideas in Sebastian Aaltonen's [*No Graphics API*](https://www.
 with GPU pointers, descriptor heaps, and shared Slang shaders.
 
 The goal is to make GPU programming feel more like working with ordinary memory and data structures:
-GPU pointers for data, heap indices for textures, and a small argument structure for each draw or dispatch.
+GPU pointers for data, heap indices for textures, and one GPU pointer to the arguments of each draw or dispatch.
 
 Metal 4 and Vulkan are supported native backends. CMake selects Metal on macOS/iOS and Vulkan on Windows/Linux.
 Both use the same C++ API and Slang sources. Windows and macOS include windowed examples; Linux currently supports headless use.
@@ -26,7 +26,7 @@ still needs. NoGraphicsAPI makes that alternative data model the foundation of t
 - **Bindless textures and samplers.** The application owns descriptor heaps and chooses their indices.
   Materials carry those indices as data. Changing materials does not require constructing or rebinding
   per-material descriptor sets.
-- **Root arguments instead of binding tables.** Each draw or dispatch receives one small structure
+- **Root arguments instead of binding tables.** Each draw or dispatch receives a GPU pointer to a structure
   containing GPU pointers, texture indices, and constants. The CPU and shader share its declaration;
   there are no descriptor-set layouts or pipeline layouts to keep in agreement.
 - **Less pipeline-state coupling.** Resource-binding and vertex layouts are absent from pipeline
@@ -53,16 +53,18 @@ struct RootArguments
 };
 ```
 
-Fill it with GPU addresses, a transform and a texture-heap index, then pass it to a draw:
+Allocate a root from application-owned mapped storage, fill it through the CPU address, then pass its GPU address:
 
 ```cpp
-RootArguments root{
+// frame_data is a gpu::BumpAllocator over a retired frame slot.
+const gpu::GpuCpuRange<RootArguments> root = frame_data.allocate<RootArguments>();
+*root.cpu = {
     .vertices = vertex_memory.gpu,
     .material = material_memory.gpu,
     .transform = transform,
     .texture_index = texture_index,
 };
-gpu::draw(commands, root, vertex_count);
+gpu::draw(commands, root.gpu, vertex_count);
 ```
 
 With `<NoGraphicsAPI/shader.slang>`, the shader accesses the same data directly:
@@ -74,8 +76,8 @@ Material material = *root.material;
 Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
 ```
 
-Small CPU roots (up to 256 bytes) are copied into a reusable command-pool arena. To consume application-owned or GPU-written
-roots, call `set_root_pointer(commands, gpu_address)` and pass `{}` to the draw or dispatch. All graphics stages share one root.
+Draws and dispatches take GPU root pointers directly, including roots written by earlier GPU work. All graphics stages share one root.
+Keep each root allocation alive and stable until its GPU use completes; pass `nullptr` for rootless shaders.
 See the [design comparison](docs/no-graphics-api-comparison.md) for the remaining differences and
 the [shader guide](docs/slang.md) for complete examples.
 

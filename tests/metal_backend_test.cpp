@@ -72,12 +72,14 @@ bool test_heaps_and_roots(gpu::Device* device, gpu::TimelineSemaphore* timeline)
     gpu::set_sampler_descriptor_heap(commands, samplers);
     gpu::bind_pso(commands, pso);
     Root root{.output = reinterpret_cast<uint32*>(output.range.gpu), .texture_index = 9, .sampler_index = 12, .value = 23, .storage_index = 10};
-    gpu::dispatch(commands, root, {.x = 1, .y = 1, .z = 1});
-    // Disjoint writes need no barrier: both dispatches must snapshot roots inside the same encoder.
+    memcpy(upload.range.cpu + 96, &root, sizeof(root));
+    gpu::dispatch(commands, upload.range.gpu + 96, {.x = 1, .y = 1, .z = 1});
+    // Disjoint writes need no barrier; each dispatch points to a separate stable root record.
     root.output += 4;
     root.value = 101;
     root.storage_index = 11;
-    gpu::dispatch_indirect(commands, root, {.gpu = upload.range.gpu + 64, .size = sizeof(indirect)});
+    memcpy(upload.range.cpu + 128, &root, sizeof(root));
+    gpu::dispatch_indirect(commands, upload.range.gpu + 128, {.gpu = upload.range.gpu + 64, .size = sizeof(indirect)});
     memset(&root, 0, sizeof(root));
     gpu::barrier(commands, gpu::Stage::compute, gpu::Access::shader_write, gpu::Stage::transfer, gpu::Access::transfer_read);
     gpu::copy_memory(commands, gpu::gpu_range(output), {.gpu = readback.range.gpu, .size = 256});
@@ -145,12 +147,14 @@ bool test_draws(gpu::Device* device, gpu::TimelineSemaphore* timeline)
         gpu::begin_render_pass(commands, {.colors = {{.render_view = view, .load = gpu::LoadOp::clear}}});
         gpu::bind_pso(commands, pso);
         gpu::ClearColor root{.x = 1.0f, .y = 0.0f, .z = 0.0f, .w = 1.0f};
+        memcpy(arguments.range.cpu + 192 + mode * sizeof(root), &root, sizeof(root));
         switch (mode)
         {
-        case 0: gpu::draw(commands, root, 3); break;
-        case 1: gpu::draw_indexed(commands, root, index_range, gpu::IndexType::uint32, 3); break;
-        case 2: gpu::draw_indirect(commands, root, {.gpu = arguments.range.gpu + 64, .size = sizeof(indirect)}); break;
-        case 3: gpu::draw_indexed_indirect(commands, root, index_range, gpu::IndexType::uint32,
+        case 0: gpu::draw(commands, arguments.range.gpu + 192 + mode * sizeof(root), 3); break;
+        case 1: gpu::draw_indexed(commands, arguments.range.gpu + 192 + mode * sizeof(root), index_range, gpu::IndexType::uint32, 3); break;
+        case 2: gpu::draw_indirect(commands, arguments.range.gpu + 192 + mode * sizeof(root),
+                                   {.gpu = arguments.range.gpu + 64, .size = sizeof(indirect)}); break;
+        case 3: gpu::draw_indexed_indirect(commands, arguments.range.gpu + 192 + mode * sizeof(root), index_range, gpu::IndexType::uint32,
                                          {.gpu = arguments.range.gpu + 128, .size = sizeof(indexed_indirect)}); break;
         }
         memset(&root, 0, sizeof(root));
@@ -227,7 +231,8 @@ bool test_viewports_and_culling(gpu::Device* device, gpu::TimelineSemaphore* tim
     const gpu::TextureHeap heap = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
     gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
     gpu::RenderView* view = gpu::create_render_view(color);
-    const gpu::GpuHeap indices = gpu::create_gpu_heap(device, 6 * sizeof(uint32));
+    const gpu::GpuHeap indices = gpu::create_gpu_heap(device, 32 + sizeof(gpu::ClearColor));
+    *reinterpret_cast<gpu::ClearColor*>(indices.range.cpu + 32) = {.x = 1, .w = 1};
     const uint32 index_data[]{0, 1, 2, 0, 2, 1};
     memcpy(indices.range.cpu, index_data, sizeof(index_data));
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, 256 * (sizeof(cases) / sizeof(cases[0])), gpu::MemoryType::readback);
@@ -238,7 +243,7 @@ bool test_viewports_and_culling(gpu::Device* device, gpu::TimelineSemaphore* tim
             gpu::set_viewport(commands, {.x = 2, .y = cases[i].negative ? 7.0f : 1.0f, .width = 4, .height = cases[i].negative ? -6.0f : 6.0f});
         if (cases[i].scissor) gpu::set_scissor(commands, {.x = 3, .y = 2, .width = 2, .height = 3});
         gpu::bind_pso(commands, pipelines[cases[i].pipeline]);
-        gpu::draw_indexed(commands, gpu::ClearColor{.x = 1, .w = 1},
+        gpu::draw_indexed(commands, indices.range.gpu + 32,
             {.gpu = indices.range.gpu + (cases[i].reversed ? 3 : 0) * sizeof(uint32), .size = 3 * sizeof(uint32)}, gpu::IndexType::uint32, 3);
         gpu::end_render_pass(commands);
         gpu::barrier(commands, gpu::Stage::color_output, gpu::Access::color_write, gpu::Stage::transfer, gpu::Access::transfer_read);

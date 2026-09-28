@@ -585,7 +585,6 @@ struct TimelineSemaphore
 struct CommandBuffer
 {
     Device* state = nullptr;
-    CommandPool* pool = nullptr;
     CommandBuffer* next = nullptr;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
@@ -602,8 +601,6 @@ struct CommandBuffer
 struct CommandPool
 {
     Device* state = nullptr;
-    GpuHeap roots = {};
-    uint64 root_offset = 0;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     CommandBuffer* first = nullptr;
     CommandBuffer* last = nullptr;
@@ -2998,7 +2995,7 @@ void destroy_pso(PSO* pso) noexcept
     delete pso;
 }
 
-CommandPool* create_command_pool(Device* device, uint32 queue_index, uint64 root_capacity) noexcept
+CommandPool* create_command_pool(Device* device, uint32 queue_index) noexcept
 {
     assert(device && queue_index < device->queue_count && "create_command_pool requires an available queue index");
     CommandPool* pool = new CommandPool{.state = device, .timestamps = device->queues[queue_index].timestamps};
@@ -3008,7 +3005,6 @@ CommandPool* create_command_pool(Device* device, uint32 queue_index, uint64 root
         .queueFamilyIndex = device->queues[queue_index].family_index,
     };
     require_vk(vkCreateCommandPool(device->device, &pool_info, nullptr, &pool->command_pool));
-    if (root_capacity) pool->roots = create_gpu_heap(device, root_capacity);
     return pool;
 }
 
@@ -3026,7 +3022,6 @@ void destroy_command_pool(CommandPool* pool) noexcept
         delete commands;
     }
     vkDestroyCommandPool(pool->state->device, pool->command_pool, nullptr);
-    destroy_gpu_heap(pool->roots);
     delete pool;
 }
 
@@ -3041,7 +3036,6 @@ void reset_command_pool(CommandPool* pool) noexcept
     }
     assert_vk(vkResetCommandPool(pool->state->device, pool->command_pool, 0));
     pool->next_buffer = pool->first;
-    pool->root_offset = 0;
 }
 
 void read_timestamps(CommandPool* pool) noexcept
@@ -3068,7 +3062,7 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
     }
     else
     {
-        commands = new CommandBuffer{.state = pool->state, .pool = pool, .command_pool = pool->command_pool};
+        commands = new CommandBuffer{.state = pool->state, .command_pool = pool->command_pool};
         const VkCommandBufferAllocateInfo allocate_info{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = pool->command_pool,
@@ -3432,28 +3426,18 @@ VkDeviceMemoryImageCopyKHR make_texture_copy_region(const Texture& texture, cons
     };
 }
 
-void set_root_pointer(CommandBuffer* commands, const void* gpu_root) noexcept
+namespace
 {
-    assert(commands && gpu_root && (reinterpret_cast<uintptr>(gpu_root) & 15u) == 0);
+void emit_root_pointer(CommandBuffer* commands, const void* root) noexcept
+{
+    if (!root) return;
+    assert((reinterpret_cast<uintptr>(root) & 15u) == 0);
     const VkPushDataInfoEXT info{
         .sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
-        .data = {
-            .address = &gpu_root,
-            .size = sizeof(gpu_root),
-        },
+        .data = {.address = &root, .size = sizeof(root)},
     };
     commands->state->fn.cmd_push_data(commands->command_buffer, &info);
 }
-
-void emit_root_data(CommandBuffer* commands, ByteSpan root) noexcept
-{
-    if (root.size == 0) return;
-    CommandPool* pool = commands->pool;
-    const uint64 size = align_up<uint64>(root.size, 16);
-    assert(root.data && pool->root_offset + size <= pool->roots.range.size && "command pool root arena exhausted");
-    memcpy(pool->roots.range.cpu + pool->root_offset, root.data, root.size);
-    set_root_pointer(commands, pool->roots.range.gpu + pool->root_offset);
-    pool->root_offset += size;
 }
 
 void set_texture_descriptor_heap(CommandBuffer* commands, TextureDescriptorHeap* heap) noexcept
@@ -3605,20 +3589,18 @@ void end_render_pass(CommandBuffer* commands) noexcept
     vkCmdEndRendering(commands->command_buffer);
 }
 
-void draw(CommandBuffer* commands, ByteSpan root, uint32 vertex_count, uint32 instance_count, uint32 first_vertex, uint32 first_instance) noexcept
+void draw(CommandBuffer* commands, const void* root, uint32 vertex_count, uint32 instance_count, uint32 first_vertex, uint32 first_instance) noexcept
 {
     assert(commands);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     vkCmdDraw(commands->command_buffer, vertex_count, instance_count, first_vertex, first_instance);
 }
 
-void draw_indexed(CommandBuffer* commands, ByteSpan root, GpuRange indices, IndexType type, uint32 index_count, uint32 instance_count, uint32 first_index,
+void draw_indexed(CommandBuffer* commands, const void* root, GpuRange indices, IndexType type, uint32 index_count, uint32 instance_count, uint32 first_index,
                   int32 vertex_offset, uint32 first_instance) noexcept
 {
     assert(commands && commands->state);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     const VkBindIndexBuffer3InfoKHR bind_info{
         .sType = VK_STRUCTURE_TYPE_BIND_INDEX_BUFFER_3_INFO_KHR,
         .addressRange = {
@@ -3632,11 +3614,10 @@ void draw_indexed(CommandBuffer* commands, ByteSpan root, GpuRange indices, Inde
     vkCmdDrawIndexed(commands->command_buffer, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
 
-void draw_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
+void draw_indirect(CommandBuffer* commands, const void* root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
 {
     assert(commands && commands->state);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     const VkDrawIndirect2InfoKHR info{
         .sType = VK_STRUCTURE_TYPE_DRAW_INDIRECT_2_INFO_KHR,
         .addressRange = {
@@ -3650,12 +3631,11 @@ void draw_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, u
     commands->state->fn.cmd_draw_indirect(commands->command_buffer, &info);
 }
 
-void draw_indexed_indirect(CommandBuffer* commands, ByteSpan root, GpuRange indices, IndexType type, GpuRange arguments, uint32 draw_count,
+void draw_indexed_indirect(CommandBuffer* commands, const void* root, GpuRange indices, IndexType type, GpuRange arguments, uint32 draw_count,
                            uint32 stride) noexcept
 {
     assert(commands && commands->state);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     const VkBindIndexBuffer3InfoKHR bind_info{
         .sType = VK_STRUCTURE_TYPE_BIND_INDEX_BUFFER_3_INFO_KHR,
         .addressRange = {
@@ -3679,19 +3659,17 @@ void draw_indexed_indirect(CommandBuffer* commands, ByteSpan root, GpuRange indi
     commands->state->fn.cmd_draw_indexed_indirect(commands->command_buffer, &info);
 }
 
-void dispatch(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noexcept
+void dispatch(CommandBuffer* commands, const void* root, uint32x3 group_count) noexcept
 {
     assert(commands);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     vkCmdDispatch(commands->command_buffer, group_count.x, group_count.y, group_count.z);
 }
 
-void dispatch_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments) noexcept
+void dispatch_indirect(CommandBuffer* commands, const void* root, GpuRange arguments) noexcept
 {
     assert(commands && commands->state);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     const VkDispatchIndirect2InfoKHR info{
         .sType = VK_STRUCTURE_TYPE_DISPATCH_INDIRECT_2_INFO_KHR,
         .addressRange = {
@@ -3703,20 +3681,18 @@ void dispatch_indirect(CommandBuffer* commands, ByteSpan root, GpuRange argument
     commands->state->fn.cmd_dispatch_indirect(commands->command_buffer, &info);
 }
 
-void draw_meshlets(CommandBuffer* commands, ByteSpan root, uint32x3 group_count) noexcept
+void draw_meshlets(CommandBuffer* commands, const void* root, uint32x3 group_count) noexcept
 {
     assert(commands && commands->state);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     commands->state->fn.cmd_draw_mesh_tasks(commands->command_buffer, group_count.x, group_count.y, group_count.z);
 }
 
-void draw_meshlets_indirect(CommandBuffer* commands, ByteSpan root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
+void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange arguments, uint32 draw_count, uint32 stride) noexcept
 {
     assert(commands && commands->state);
     assert(commands->state->caps.indirect_mesh_draw);
-    assert(root.size <= 256);
-    emit_root_data(commands, root);
+    emit_root_pointer(commands, root);
     const VkDrawIndirect2InfoKHR info{
         .sType = VK_STRUCTURE_TYPE_DRAW_INDIRECT_2_INFO_KHR,
         .addressRange = {

@@ -212,6 +212,7 @@ int main()
         create_texture_descriptor_heap(device, gbuffer_texture_count * frames_in_flight);
     GpuHeap data_heap = create_gpu_heap(device, data_heap_size);
     BumpAllocator data_allocator(data_heap.range);
+    const GpuCpuRange<byte> frame_ranges[frames_in_flight]{data_allocator.allocate(4096), data_allocator.allocate(4096)};
     const GpuCpuRange<ObjectData> object_allocation = data_allocator.allocate<ObjectData>(object_count);
     initialize_object_data(object_allocation.cpu);
     TextureHeap texture_heap = create_texture_heap(device, texture_heap_size);
@@ -242,6 +243,7 @@ int main()
         }
         delete_queue.tick();
 
+        BumpAllocator frame_data(frame_ranges[latest_completion.value % frames_in_flight]);
         CommandPool* command_pool = command_pools[latest_completion.value % frames_in_flight];
         reset_command_pool(command_pool);
         CommandBuffer* commands = begin_commands(command_pool);
@@ -274,10 +276,12 @@ int main()
             Stage::compute,  Access::shader_read | Access::shader_write);
 
         bind_pso(commands, simulation_pso);
-        dispatch(commands, SimulationRoot{
+        const GpuCpuRange<SimulationRoot> simulation_root = frame_data.allocate<SimulationRoot>();
+        *simulation_root.cpu = {
             .objects = object_allocation.gpu,
             .delta_seconds = delta_seconds,
-        }, {.x = object_count / simulation_thread_count, .y = 1, .z = 1});
+        };
+        dispatch(commands, simulation_root.gpu, {.x = object_count / simulation_thread_count, .y = 1, .z = 1});
 
         // G-buffer
         barrier(commands,
@@ -310,7 +314,8 @@ int main()
         projection.rows[1].y = -projection.rows[1].y;
         rotation_angle += cube_rotation_speed * delta_seconds;
 
-        const GBufferRoot gbuffer_root{
+        const GpuCpuRange<GBufferRoot> gbuffer_root = frame_data.allocate<GBufferRoot>();
+        *gbuffer_root.cpu = {
             .objects = object_allocation.gpu,
             .view_projection = projection * view,
             .orientation = math::to_float3x4(
@@ -319,7 +324,7 @@ int main()
                 math::scale({.x = cube_scale, .y = cube_scale, .z = cube_scale})),
         };
 
-        draw_meshlets(commands, gbuffer_root, {.x = object_grid_width, .y = object_grid_width, .z = 1});
+        draw_meshlets(commands, gbuffer_root.gpu, {.x = object_grid_width, .y = object_grid_width, .z = 1});
 
         end_render_pass(commands);
 
@@ -337,7 +342,8 @@ int main()
 
         bind_pso(commands, deferred_lighting_pso);
 
-        const DeferredLightingRoot deferred_lighting_root = {
+        const GpuCpuRange<DeferredLightingRoot> deferred_lighting_root = frame_data.allocate<DeferredLightingRoot>();
+        *deferred_lighting_root.cpu = {
             .camera_position = math::to_float4(camera_position, 1.0f),
             .ray_center = math::to_float4(view_forward),
             .ray_horizontal = math::to_float4(view_right / projection.rows[0].x),
@@ -355,7 +361,7 @@ int main()
             .gbuffer_texture_base = descriptor_row * gbuffer_texture_count,
         };
 
-        draw(commands, deferred_lighting_root, 3);
+        draw(commands, deferred_lighting_root.gpu, 3);
 
         end_render_pass(commands);
 

@@ -16,6 +16,7 @@ static_assert(sizeof(TaskTestData) == 784 && sizeof(TaskTestPayload) == 128);
 static const uint64 pixel_offset = 1024;
 static const uint64 pixel_bytes = task_test_width * task_test_height * 4;
 static const uint64 data_bytes = sizeof(TaskTestData) + sizeof(gpu::uint32x3);
+static const uint64 root_offset = (data_bytes + 15) & ~uint64(15);
 
 struct ShaderCode
 {
@@ -86,7 +87,7 @@ static bool initialize(Fixture& fixture) noexcept
     if (!fixture.view) return false;
     fixture.completion.semaphore = gpu::create_timeline_semaphore(fixture.device);
     if (!fixture.completion.semaphore) return false;
-    fixture.seed = gpu::create_gpu_heap(fixture.device, data_bytes);
+    fixture.seed = gpu::create_gpu_heap(fixture.device, root_offset + sizeof(TaskShaderRoot));
     fixture.data = gpu::create_gpu_heap(fixture.device, data_bytes, gpu::MemoryType::gpu_only);
     fixture.readback = gpu::create_gpu_heap(fixture.device, pixel_offset + pixel_bytes, gpu::MemoryType::readback);
     gpu::end_commands(commands);
@@ -115,7 +116,8 @@ static bool render_case(Fixture& fixture, uint32 count, uint32 visible_mask, uin
     gpu::CommandBuffer* commands = gpu::begin_commands(fixture.pool);
     gpu::barrier(commands, gpu::Stage::task | gpu::Stage::mesh | gpu::Stage::transfer, gpu::Access::shader_write | gpu::Access::transfer_read,
         gpu::Stage::transfer, gpu::Access::transfer_write);
-    gpu::copy_memory(commands, gpu::gpu_range(fixture.seed), gpu::gpu_range(fixture.data));
+    memcpy(fixture.seed.range.cpu + root_offset, &root, sizeof(root));
+    gpu::copy_memory(commands, {.gpu = fixture.seed.range.gpu, .size = data_bytes}, gpu::gpu_range(fixture.data));
     gpu::barrier(commands, gpu::Stage::transfer, gpu::Access::transfer_write, gpu::Stage::task | gpu::Stage::mesh | gpu::Stage::indirect,
         gpu::Access::shader_read | gpu::Access::shader_write | gpu::Access::indirect_read);
     gpu::barrier(commands, gpu::Stage::transfer, gpu::Access::transfer_read, gpu::Stage::color_output, gpu::Access::color_write);
@@ -124,9 +126,10 @@ static bool render_case(Fixture& fixture, uint32 count, uint32 visible_mask, uin
     gpu::set_scissor(commands, {.width = task_test_width, .height = task_test_height});
     gpu::bind_pso(commands, fixture.pso);
     if (indirect)
-        gpu::draw_meshlets_indirect(commands, root, {.gpu = fixture.data.range.gpu + sizeof(TaskTestData), .size = sizeof(gpu::uint32x3)});
+        gpu::draw_meshlets_indirect(commands, fixture.seed.range.gpu + root_offset,
+            {.gpu = fixture.data.range.gpu + sizeof(TaskTestData), .size = sizeof(gpu::uint32x3)});
     else
-        gpu::draw_meshlets(commands, root, {.x = batches, .y = 1, .z = 1});
+        gpu::draw_meshlets(commands, fixture.seed.range.gpu + root_offset, {.x = batches, .y = 1, .z = 1});
     gpu::end_render_pass(commands);
     gpu::barrier(commands, gpu::Stage::task | gpu::Stage::mesh, gpu::Access::shader_write, gpu::Stage::transfer, gpu::Access::transfer_read);
     gpu::barrier(commands, gpu::Stage::color_output, gpu::Access::color_write, gpu::Stage::transfer, gpu::Access::transfer_read);

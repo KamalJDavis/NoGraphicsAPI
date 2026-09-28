@@ -257,7 +257,7 @@ NoGraphicsAPI_compile_slang(${root_generate_code} ${CMAKE_CURRENT_SOURCE_DIR}/ro
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_generate_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
 add_executable(test_root_data root_data_test.cpp ${root_data_code} ${root_generate_code})
 NoGraphicsAPI_disable_exceptions(test_root_data)
-target_link_libraries(test_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+target_link_libraries(test_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::allocators)
 target_compile_definitions(test_root_data PRIVATE NOGRAPHICSAPI_ROOT_DATA_PATH="${root_data_code}"
     NOGRAPHICSAPI_ROOT_GENERATE_PATH="${root_generate_code}")
 add_test(NAME test_root_data COMMAND test_root_data)
@@ -280,7 +280,7 @@ if(NOT APPLE)
     endforeach()
     add_executable(benchmark_root_data EXCLUDE_FROM_ALL root_data_benchmark.cpp ${root_benchmark_shaders})
     NoGraphicsAPI_disable_exceptions(benchmark_root_data)
-    target_link_libraries(benchmark_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+    target_link_libraries(benchmark_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::allocators)
 endif()
 
 set(shader_abi_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/shader_abi.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})

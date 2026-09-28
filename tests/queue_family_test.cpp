@@ -45,7 +45,7 @@ static bool initialize(Fixture& fixture) noexcept
     fixture.queues[1] = caps.compute_queue_count ? caps.general_queue_count : 0;
     for (uint32 index = 0; index < 3; ++index) fixture.pools[index] = create_command_pool(fixture.device, fixture.queues[index]);
     for (TimelineSemaphore*& signal : fixture.signals) signal = create_timeline_semaphore(fixture.device);
-    fixture.upload = create_gpu_heap(fixture.device, 2 * slot_bytes);
+    fixture.upload = create_gpu_heap(fixture.device, 2 * slot_bytes + sizeof(QueueFamilyRoot));
     fixture.data = create_gpu_heap(fixture.device, 2 * slot_bytes, MemoryType::gpu_only);
     fixture.readback = create_gpu_heap(fixture.device, 4 * slot_bytes, MemoryType::readback);
     fixture.descriptors = create_texture_descriptor_heap(fixture.device, 2);
@@ -96,12 +96,13 @@ static bool run_case(Fixture& fixture, uint32 iteration) noexcept
     write_timestamp(compute, timestamp_cpu + 2);
     bind_pso(compute, fixture.compute);
     set_texture_descriptor_heap(compute, fixture.descriptors);
-    dispatch(compute, QueueFamilyRoot{
+    *reinterpret_cast<QueueFamilyRoot*>(fixture.upload.range.cpu + 2 * slot_bytes) = {
         .source = reinterpret_cast<uint32*>(fixture.data.range.gpu),
         .destination = reinterpret_cast<uint32*>(fixture.data.range.gpu + slot_bytes),
         .source_texture = 0,
         .destination_texture = 1,
-    }, {.x = (queue_test_width + 7) / 8, .y = (queue_test_height + 7) / 8, .z = 1});
+    };
+    dispatch(compute, fixture.upload.range.gpu + 2 * slot_bytes, {.x = (queue_test_width + 7) / 8, .y = (queue_test_height + 7) / 8, .z = 1});
     write_timestamp(compute, timestamp_cpu + 3);
     end_commands(compute);
 

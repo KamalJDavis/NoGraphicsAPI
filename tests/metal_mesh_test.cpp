@@ -37,20 +37,21 @@ int main(int argc, const char* const* argv)
     const gpu::TextureHeap heap = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
     gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
     gpu::RenderView* view = gpu::create_render_view(color);
-    const gpu::GpuHeap upload = gpu::create_gpu_heap(device, 32);
+    const gpu::GpuHeap upload = gpu::create_gpu_heap(device, 64);
     const gpu::GpuHeap arguments = gpu::create_gpu_heap(device, 32, gpu::MemoryType::gpu_only);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, 512, gpu::MemoryType::readback);
     const uint32 indirect[8]{1, 1, 1, 0, 1, 1, 1, 0};
     memcpy(upload.range.cpu, indirect, sizeof(indirect));
-    gpu::copy_memory(commands, gpu::gpu_range(upload), gpu::gpu_range(arguments));
+    gpu::copy_memory(commands, {.gpu = upload.range.gpu, .size = 32}, gpu::gpu_range(arguments));
     gpu::barrier(commands, gpu::Stage::transfer, gpu::Access::transfer_write, gpu::Stage::indirect, gpu::Access::indirect_read);
     for (uint32 mode = 0; mode < (test_indirect ? 2u : 1u); ++mode)
     {
         gpu::begin_render_pass(commands, {.colors = {{.render_view = view, .load = gpu::LoadOp::clear}}});
         gpu::bind_pso(commands, pipeline);
         gpu::ClearColor root{.x = mode == 0 ? 1.0f : 0.0f, .y = mode == 1 ? 1.0f : 0.0f, .z = 0.0f, .w = 1.0f};
-        if (mode == 0) gpu::draw_meshlets(commands, root, {.x = 1, .y = 1, .z = 1});
-        else gpu::draw_meshlets_indirect(commands, root, gpu::gpu_range(arguments), 2, 16);
+        memcpy(upload.range.cpu + 32 + mode * sizeof(root), &root, sizeof(root));
+        if (mode == 0) gpu::draw_meshlets(commands, upload.range.gpu + 32 + mode * sizeof(root), {.x = 1, .y = 1, .z = 1});
+        else gpu::draw_meshlets_indirect(commands, upload.range.gpu + 32 + mode * sizeof(root), gpu::gpu_range(arguments), 2, 16);
         memset(&root, 0, sizeof(root));
         gpu::end_render_pass(commands);
         gpu::barrier(commands, gpu::Stage::color_output, gpu::Access::color_write, gpu::Stage::transfer, gpu::Access::transfer_read);

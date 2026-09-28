@@ -110,6 +110,7 @@ int main() {
     // GPU resources
     GpuHeap data_heap = create_gpu_heap(device, data_heap_size);
     BumpAllocator data_allocator(data_heap.range);
+    const GpuCpuRange<byte> frame_ranges[2]{data_allocator.allocate(4096), data_allocator.allocate(4096)};
     const GpuCpuRange<CubeVertex> vertex_allocation = data_allocator.allocate<CubeVertex>(cube_vertex_count);
     const GpuCpuRange<uint16> index_allocation = data_allocator.allocate<uint16>(cube_index_count);
     const GpuCpuRange<byte> upload_allocation = data_allocator.allocate(texture_byte_count);
@@ -158,6 +159,7 @@ int main() {
 	{
         if (latest_completion.value >= 2)
             wait_timeline({.semaphore = latest_completion.semaphore, .value = latest_completion.value - 1});
+        BumpAllocator frame_data(frame_ranges[latest_completion.value % 2]);
         CommandPool* command_pool = command_pools[latest_completion.value % 2];
         reset_command_pool(command_pool);
         CommandBuffer* commands = begin_commands(command_pool);
@@ -208,12 +210,13 @@ int main() {
         float4x4 projection = math::perspective_rh_zo(45.0f * math::pi / 180.0f,
                                                      float(frame.extent.x) / float(frame.extent.y), 0.1f, 100.0f);
         projection.rows[1].y = -projection.rows[1].y;
-		const CubeRootArguments root {
+		const GpuCpuRange<CubeRootArguments> root = frame_data.allocate<CubeRootArguments>();
+        *root.cpu = {
             .vertices = vertex_allocation.gpu,
             .transform = projection * view * math::rotation_y(radians_per_frame * float(frame_index++)),
         };
 
-		draw_indexed(commands, root, gpu_range(index_allocation), IndexType::uint16, cube_index_count);
+		draw_indexed(commands, root.gpu, gpu_range(index_allocation), IndexType::uint16, cube_index_count);
 
 		end_render_pass(commands);
 

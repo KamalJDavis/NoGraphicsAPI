@@ -23,24 +23,35 @@ nonuniform annotations. See [Metal implementation](metal-support.md) for texture
 
 ## Root and pointer layout
 
-Define each root once in the shader's matching shared header. Draws and dispatches copy up to 256
-bytes into a fixed command-pool arena; the CPU value can be stack-local. Pool creation reserves
-4 MiB by default, configurable with `create_command_pool(device, queue, root_capacity)`. Each copy
-consumes its size rounded up to 16 bytes. Reset reclaims the arena after all submitted buffers finish.
-Rootless stages need no root declaration.
+Define each root once in the shader's matching shared header. All draw and dispatch variants take
+a 16-byte-aligned GPU pointer to that structure, or `nullptr` for rootless shaders. No allocation or
+root copy happens inside the graphics API. The root and its referenced data must stay valid until
+their consuming submissions finish. For CPU-provided values that differ between commands, allocate separate records.
 
-`set_root_pointer(commands, gpu_address)` binds a 16-byte-aligned application-owned root. Pass `{}`
-to subsequent draws/dispatches to retain that binding. This avoids the copy and supports GPU-written
-root contents; the allocation must remain alive through completion. Synchronize producing GPU writes
-to the consuming shader stages with `Access::shader_read`. A nonempty CPU root replaces the binding.
-Only CPU copies have the 256-byte API limit; GPU roots still obey native shader resource limits.
+For transient CPU-written roots, use `BumpAllocator` over mapped frame storage:
+
+```cpp
+const gpu::GpuCpuRange<ExampleRoot> root = frame_data.allocate<ExampleRoot>();
+*root.cpu = {.vertices = vertices.gpu, .texture_index = texture_index};
+gpu::dispatch(commands, root.gpu, {.x = groups, .y = 1, .z = 1});
+```
+
+Typed `allocate<T>()` and `allocate_atomic<T>()` default to one element. Reclaim frame storage only
+after its timeline completes. Use ordinary allocation for a single recording thread; concurrent
+workers can reserve disjoint chunks atomically and use a separate ordinary bump allocator per chunk.
+The allocator is linear, not a wrapping ring, and never grows its storage.
+
+GPU shaders can also produce the root contents. Synchronize writes to the consuming shader stages
+with `Access::shader_read`, then pass that GPU address directly to a draw or dispatch. There is no
+256-byte API limit; roots obey native shader resource limits. The CPU selects the bound address;
+additional pointers inside the root can be selected by GPU work.
 
 `GPU_ROOT(Type, name)` selects these bindings:
 
 | Target | Root | Texture namespace | Sampler namespace |
 | --- | --- | --- | --- |
 | Vulkan | Uniform buffer at binding 0, mapped to the 64-bit address in push data | Native resource descriptor heap | Native sampler descriptor heap |
-| Metal | Exact root bytes at buffer 0 | One 64-bit pool base at buffer 1 | Typed sampler entries at buffer 2 |
+| Metal | `StructuredBuffer<T>` at buffer 0, preserving C layout | One 64-bit pool base at buffer 1 | Typed sampler entries at buffer 2 |
 
 `GPU_ROOT` preserves the shared C++ layout, including vectors, matrices and pointers, without adding
 backend fields. Plain Metal `ConstantBuffer<Type>` can use different alignment.
