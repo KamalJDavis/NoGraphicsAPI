@@ -249,6 +249,40 @@ if(APPLE)
         ENVIRONMENT "MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1")
 endif()
 
+set(root_data_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/root_data.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
+set(root_generate_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/root_data_generate.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
+NoGraphicsAPI_compile_slang(${root_data_code} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang computeMain compute
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
+NoGraphicsAPI_compile_slang(${root_generate_code} ${CMAKE_CURRENT_SOURCE_DIR}/root_data_generate.slang computeMain compute
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_generate_shared.h ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
+add_executable(test_root_data root_data_test.cpp ${root_data_code} ${root_generate_code})
+NoGraphicsAPI_disable_exceptions(test_root_data)
+target_link_libraries(test_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+target_compile_definitions(test_root_data PRIVATE NOGRAPHICSAPI_ROOT_DATA_PATH="${root_data_code}"
+    NOGRAPHICSAPI_ROOT_GENERATE_PATH="${root_generate_code}")
+add_test(NAME test_root_data COMMAND test_root_data)
+set_tests_properties(test_root_data PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+
+if(NOT APPLE)
+    set(root_benchmark_shaders)
+    foreach(mode IN ITEMS uniform structured physical push)
+        string(TOUPPER ${mode} mode_define)
+        foreach(bytes IN ITEMS 64 256)
+            set(entry computeMain)
+            if(bytes EQUAL 64)
+                set(entry smallMain)
+            endif()
+            set(output ${CMAKE_CURRENT_BINARY_DIR}/root-benchmark/${mode}-${bytes}.spv)
+            NoGraphicsAPI_compile_slang(${output} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang ${entry} compute
+                DEFINES ROOT_DATA_${mode_define} OPTIONS -O3 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
+            list(APPEND root_benchmark_shaders ${output})
+        endforeach()
+    endforeach()
+    add_executable(benchmark_root_data EXCLUDE_FROM_ALL root_data_benchmark.cpp ${root_benchmark_shaders})
+    NoGraphicsAPI_disable_exceptions(benchmark_root_data)
+    target_link_libraries(benchmark_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::types)
+endif()
+
 set(shader_abi_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/shader_abi.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
 NoGraphicsAPI_compile_slang(${shader_abi_code} ${CMAKE_CURRENT_SOURCE_DIR}/shader_abi.slang computeMain compute
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shader_abi_shared.h)

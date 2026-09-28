@@ -23,20 +23,30 @@ nonuniform annotations. See [Metal implementation](metal-support.md) for texture
 
 ## Root and pointer layout
 
-Define each root once in the shader's matching shared header. Pass those exact bytes to each draw
-or dispatch; roots fit 256 bytes, and larger data stays behind GPU pointers. Rootless stages need no
-root declaration. The CPU root can be stack-local; referenced resources and mutable data retain
-their normal submission lifetime.
+Define each root once in the shader's matching shared header. Draws and dispatches copy up to 256
+bytes into a fixed command-pool arena; the CPU value can be stack-local. Pool creation reserves
+4 MiB by default, configurable with `create_command_pool(device, queue, root_capacity)`. Each copy
+consumes its size rounded up to 16 bytes. Reset reclaims the arena after all submitted buffers finish.
+Rootless stages need no root declaration.
+
+`set_root_pointer(commands, gpu_address)` binds a 16-byte-aligned application-owned root. Pass `{}`
+to subsequent draws/dispatches to retain that binding. This avoids the copy and supports GPU-written
+root contents; the allocation must remain alive through completion. Synchronize producing GPU writes
+to the consuming shader stages with `Access::shader_read`. A nonempty CPU root replaces the binding.
+Only CPU copies have the 256-byte API limit; GPU roots still obey native shader resource limits.
 
 `GPU_ROOT(Type, name)` selects these bindings:
 
 | Target | Root | Texture namespace | Sampler namespace |
 | --- | --- | --- | --- |
-| Vulkan | Push data / push constants | Native resource descriptor heap | Native sampler descriptor heap |
+| Vulkan | Uniform buffer at binding 0, mapped to the 64-bit address in push data | Native resource descriptor heap | Native sampler descriptor heap |
 | Metal | Exact root bytes at buffer 0 | One 64-bit pool base at buffer 1 | Typed sampler entries at buffer 2 |
 
 `GPU_ROOT` preserves the shared C++ layout, including vectors, matrices and pointers, without adding
 backend fields. Plain Metal `ConstantBuffer<Type>` can use different alignment.
+
+Recompile Vulkan shaders when adopting this ABI: the push payload is now eight bytes, not the root
+structure itself. The binding uses `VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`; no buffer descriptor is allocated.
 
 `GPU_ADDRESS(value)` forms an address for shared code such as
 `loadAligned<16>(GPU_ADDRESS(root.camera->position))`. It preserves Vulkan's explicit load/store

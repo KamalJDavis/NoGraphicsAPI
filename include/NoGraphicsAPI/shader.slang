@@ -39,7 +39,7 @@ T gpu_sampler<T : IOpaqueDescriptor = SamplerState>(uint index)
 
 #else
 
-#define GPU_ROOT(type, name) [[vk::push_constant]] ConstantBuffer<type> name
+#define GPU_ROOT(type, name) [[vk::binding(0, 0)]] ConstantBuffer<type> name
 #define GPU_ADDRESS(value) (&(value))
 
 [ForceInline]

@@ -56,7 +56,7 @@ There is no host-only or non-coherent fallback path.
 provide addressable data storage. Opaque texture and sampler descriptor heaps use separate creation APIs.
 `GpuCpuRange<T>::size` is always bytes, regardless of `T`, and a GPU-only heap has a null CPU pointer.
 
-The backend has no data suballocator. The optional utility library provides fixed-16-byte
+Application data has no backend suballocator. The optional utility library provides fixed-16-byte
 `BumpAllocator` and reusable `HeapAllocator` policies over `GpuHeap::range`; the graphics API does not
 depend on either policy. `BumpAllocator::allocate_atomic()` provides relaxed-atomic concurrent worker
 reservations that return disjoint mapped ranges. All other allocator operations require exclusive access
@@ -153,26 +153,32 @@ with its submission timeline.
 ## Root ABI
 
 Each draw, mesh draw, and dispatch accepts one `ByteSpan`; the typed convenience path accepts a
-trivially copyable root structure. Immediately before the native command, the backend copies those
-bytes with `vkCmdPushDataEXT`. The structure may combine:
+trivially copyable root structure. The backend copies those bytes into a mapped, device-local command-pool
+arena, then pushes only its 64-bit GPU address with `vkCmdPushDataEXT`. The structure may combine:
 
 - typed GPU pointers;
 - 32-bit texture and sampler indices;
 - ordinary scalar, vector, and matrix values.
 
-The CPU root value only needs to survive the API call because the command buffer receives a copy.
-One root is shared by the active graphics stages. Referenced heap ranges and descriptor entries follow the
-normal submission and timeline lifetime rules. Root-data size must be a multiple of four and fit within
-256 bytes and `DeviceCaps::max_push_data_size`; `{}` is the rootless ABI.
+CPU roots are at most 256 bytes. Their copies consume 16-byte-aligned arena ranges shared by every
+buffer recorded from the pool. `create_command_pool` reserves a configurable 4 MiB by default;
+recording never grows it. Reset reclaims it after completion. Pools needing only memory copies or application-owned
+roots can reserve zero bytes. One root is shared by all active graphics stages.
+
+`set_root_pointer` binds application-owned GPU memory without a copy. Empty root bytes retain the
+binding, while a nonempty CPU root replaces it. GPU shaders can produce root contents for later
+draws/dispatches; synchronize writes with `Access::shader_read` at the consuming stages. That access
+includes uniform-buffer reads. Root allocations and referenced resources retain their normal GPU lifetime.
 
 Pipelines are created with `VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT` and a null pipeline layout.
 The backend never records push constants, descriptor sets, descriptor buffers, or push descriptors,
 so command buffers remain entirely in descriptor-heap mode.
 
-This is the one deliberate adaptation of the blog's proposed ABI. The post passes independent
-GPU-resident vertex and pixel roots, while Vulkan push data has a CPU source. `NoGraphicsAPI`
-therefore places one shared root in push-data storage. Shader-visible pointer fields and descriptor
-indices retain the proposed model, but roots cannot be generated or selected by the GPU.
+The shader's binding-zero uniform buffer maps directly to the address in push data through
+[`VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`](https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorSetAndBindingMappingEXT.html).
+There is no root descriptor or descriptor-set binding. The shader ABI changes from a full push-data
+structure to one address; rebuild existing Vulkan shader binaries. Separate roots per stage and
+GPU-generated binding commands are not exposed. The GPU can select additional data through pointers stored inside the root.
 
 Shared C++/Slang structures use C layout and row-major matrices. Slang 2026.14.1+ and
 SPIRV-Tools 2026.3+ are required; see [the shader contract](slang.md).

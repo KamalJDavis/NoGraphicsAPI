@@ -43,9 +43,11 @@ reinterpretation, following the tested [MSL heap experiment](https://github.com/
 
 ## Root ABI and shared shaders
 
-Each draw or dispatch copies up to 256 bytes of root arguments into command-pool storage and points
-a Metal argument-table entry at them. All graphics stages share that root. The application can pass
-a stack-local structure containing GPU pointers, texture indices and constants.
+Each draw or dispatch copies up to 256 bytes of root arguments into a fixed command-pool arena and
+points a Metal argument-table entry at them. Pool creation reserves a configurable 4 MiB by default;
+copies use 16-byte-aligned ranges, reclaimed on pool reset. All graphics stages share that root.
+`set_root_pointer` binds application-owned or GPU-written roots directly. Empty root bytes retain
+the binding. See [root lifetime and synchronization](slang.md#root-and-pointer-layout).
 
 | Metal buffer slot | Contents |
 | --- | --- |

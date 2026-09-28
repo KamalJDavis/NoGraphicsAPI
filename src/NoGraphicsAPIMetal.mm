@@ -17,7 +17,6 @@ namespace gpu
 {
 namespace
 {
-constexpr uint64 root_chunk_size = 4 * 1024 * 1024;
 constexpr MTLRenderStages render_stages = MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageObject | MTLRenderStageMesh;
 
 uint64 align_up(uint64 value, uint64 alignment) { return (value + alignment - 1) / alignment * alignment; }
@@ -209,12 +208,6 @@ struct PSO
     bool mesh = false;
 };
 
-struct RootChunk
-{
-    id<MTLBuffer> buffer = nil;
-    RootChunk* next = nullptr;
-};
-
 struct CounterPage
 {
     id<MTL4CounterHeap> heap = nil;
@@ -252,9 +245,6 @@ struct CommandBuffer
     MTL4RenderPassDescriptor* pass = nil;
     TimestampSlot* timestamps = nullptr;
     uint32 timestamp_count = 0;
-    RootChunk* roots = nullptr;
-    RootChunk* root = nullptr;
-    uint64 root_offset = 0;
     id<MTLSharedEvent> retirement = nil;
     uint64 retirement_value = 0;
     bool recording = false;
@@ -293,6 +283,8 @@ struct Queue
 struct CommandPool
 {
     Device* device = nullptr;
+    id<MTLBuffer> roots = nil;
+    uint64 root_offset = 0;
     QueueKind kind = QueueKind::general;
     CommandBuffer* first = nullptr;
     CommandBuffer* last = nullptr;
@@ -340,15 +332,6 @@ void remove_resident(Device* device, id<MTLAllocation> allocation)
     [device->residency removeAllocation:allocation];
     [device->residency commit];
     os_unfair_lock_unlock(&device->residency_lock);
-}
-
-RootChunk* create_root_chunk(Device* device)
-{
-    RootChunk* chunk = new RootChunk{};
-    chunk->buffer = [device->metal newBufferWithLength:root_chunk_size options:MTLResourceStorageModeShared];
-    if (!chunk->buffer) { report_error("root storage", nil); delete chunk; return nullptr; }
-    add_resident(device, chunk->buffer);
-    return chunk;
 }
 
 bool allocate_timestamps(Device* device, TimestampSlot* slots)
@@ -422,14 +405,6 @@ bool allocate_timestamps(Device* device, TimestampSlot* slots)
 
 void destroy_context(Device* device, CommandBuffer* commands)
 {
-    for (RootChunk* chunk = commands->roots; chunk;)
-    {
-        RootChunk* next = chunk->next;
-        remove_resident(device, chunk->buffer);
-        [chunk->buffer release];
-        delete chunk;
-        chunk = next;
-    }
     for (NativeCommandBuffer* native = commands->native_buffers; native;)
     {
         NativeCommandBuffer* next = native->next;
@@ -466,7 +441,6 @@ CommandBuffer* create_context(CommandPool* pool)
     result->arguments = [device->metal newArgumentTableWithDescriptor:arguments error:&error];
     [arguments release];
     result->pass = [MTL4RenderPassDescriptor new];
-    result->roots = create_root_chunk(device);
     if (device->timestamp_query_count)
     {
         result->timestamps = new TimestampSlot[device->timestamp_query_count]{};
@@ -476,7 +450,7 @@ CommandBuffer* create_context(CommandPool* pool)
             return nullptr;
         }
     }
-    if (!result->commands || !result->native_buffers->allocator || !result->arguments || !result->roots)
+    if (!result->commands || !result->native_buffers->allocator || !result->arguments)
     {
         report_error("command context", error);
         destroy_context(device, result);
@@ -1243,12 +1217,18 @@ void destroy_pso(PSO* pso) noexcept
     }
 }
 
-CommandPool* create_command_pool(Device* device, uint32 queue_index) noexcept
+CommandPool* create_command_pool(Device* device, uint32 queue_index, uint64 root_capacity) noexcept
 {
     @autoreleasepool
     {
         assert(queue_index < device->caps.queue_count);
         CommandPool* pool = new CommandPool{.device = device, .kind = device->queues[queue_index].kind};
+        if (root_capacity)
+        {
+            pool->roots = [device->metal newBufferWithLength:root_capacity options:MTLResourceStorageModeShared];
+            if (!pool->roots) { report_error("root storage", nil); delete pool; return nullptr; }
+            add_resident(device, pool->roots);
+        }
         depth_state(pool, {});
         for (uint32 compare = 0; compare < 8; ++compare)
             for (uint32 write = 0; write < 2; ++write)
@@ -1274,6 +1254,7 @@ void reset_command_pool(CommandPool* pool) noexcept
             for (NativeCommandBuffer* native = commands->native_buffers; native; native = native->next) [native->allocator reset];
         }
         pool->next_buffer = pool->first;
+        pool->root_offset = 0;
     }
 }
 
@@ -1296,6 +1277,8 @@ void destroy_command_pool(CommandPool* pool) noexcept
             delete chunk;
             chunk = next;
         }
+        if (pool->roots) remove_resident(pool->device, pool->roots);
+        [pool->roots release];
         delete pool;
     }
 }
@@ -1322,8 +1305,6 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
         [context->arguments setAddress:0 atIndex:0];
         [context->arguments setAddress:0 atIndex:1];
         [context->arguments setAddress:0 atIndex:2];
-        context->root = context->roots;
-        context->root_offset = 0;
         context->timestamp_count = 0;
         context->pso = nullptr;
         context->recording = true;
@@ -1776,6 +1757,12 @@ void bind_pso(CommandBuffer* commands, const PSO* pso) noexcept
     }
 }
 
+void set_root_pointer(CommandBuffer* commands, const void* gpu_root) noexcept
+{
+    assert(commands && gpu_root && (reinterpret_cast<uintptr>(gpu_root) & 15u) == 0);
+    [commands->arguments setAddress:reinterpret_cast<uintptr>(gpu_root) atIndex:0];
+}
+
 namespace
 {
 void root_data(CommandBuffer* commands, ByteSpan root)
@@ -1783,15 +1770,12 @@ void root_data(CommandBuffer* commands, ByteSpan root)
     assert(root.size <= 256);
     if (root.size)
     {
-        if (commands->root_offset + align_up(root.size, 16) > root_chunk_size)
-        {
-            if (!commands->root->next) commands->root->next = create_root_chunk(commands->device);
-            commands->root = commands->root->next;
-            commands->root_offset = 0;
-        }
-        memcpy(static_cast<byte*>(commands->root->buffer.contents) + commands->root_offset, root.data, root.size);
-        [commands->arguments setAddress:commands->root->buffer.gpuAddress + commands->root_offset atIndex:0];
-        commands->root_offset += align_up(root.size, 16);
+        CommandPool* pool = commands->pool;
+        const uint64 size = align_up(root.size, 16);
+        assert(root.data && pool->root_offset + size <= pool->roots.length && "command pool root arena exhausted");
+        memcpy(static_cast<byte*>(pool->roots.contents) + pool->root_offset, root.data, root.size);
+        set_root_pointer(commands, reinterpret_cast<const void*>(pool->roots.gpuAddress + pool->root_offset));
+        pool->root_offset += size;
     }
 }
 }

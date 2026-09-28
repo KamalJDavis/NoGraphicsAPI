@@ -74,8 +74,8 @@ Material material = *root.material;
 Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
 ```
 
-One deliberate difference from the blog: this implementation copies small root arguments (up to 256 bytes) per command
-and shares them across graphics stages, rather than passing separate GPU root pointers for each stage.
+Small CPU roots (up to 256 bytes) are copied into a reusable command-pool arena. To consume application-owned or GPU-written
+roots, call `set_root_pointer(commands, gpu_address)` and pass `{}` to the draw or dispatch. All graphics stages share one root.
 See the [design comparison](docs/no-graphics-api-comparison.md) for the remaining differences and
 the [shader guide](docs/slang.md) for complete examples.
 
@@ -196,6 +196,10 @@ ctest --preset msvc-release
 
 To open the generated solution in Visual Studio, use `build-msvc/NoGraphicsAPI.sln`.
 For a validation-enabled Debug build, use `msvc-debug` in the build and test commands.
+
+The optional Vulkan root benchmark is built with `cmake --build build-msvc --config Release --target benchmark_root_data`.
+Run `build-msvc/tests/Release/benchmark_root_data.exe build-msvc/tests/root-benchmark` to compare uniform, structured and physical
+root reads, with CPU arena copies or application-owned GPU roots. It reports CPU recording and GPU execution times separately.
 
 If the shader tools are not on `PATH`, supply their locations when configuring. Adjust these example
 paths to your installations:

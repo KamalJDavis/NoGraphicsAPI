@@ -507,7 +507,7 @@ using CreateTextureFunction = gpu::Texture* (*)(gpu::CommandBuffer*, const gpu::
 using CreateDeviceFunction = gpu::DeviceInit (*)(const gpu::DeviceDesc&) noexcept;
 using GetDrawableExtentFunction = gpu::uint32x2 (*)(gpu::Device*) noexcept;
 using AcquireFunction = gpu::SwapchainFrame (*)(gpu::CommandBuffer*) noexcept;
-using CreateCommandPoolFunction = gpu::CommandPool* (*)(gpu::Device*, uint32) noexcept;
+using CreateCommandPoolFunction = gpu::CommandPool* (*)(gpu::Device*, uint32, uint64) noexcept;
 using CommandPoolFunction = void (*)(gpu::CommandPool*) noexcept;
 using BeginCommandsFunction = gpu::CommandBuffer* (*)(gpu::CommandPool*) noexcept;
 using EndCommandsFunction = void (*)(gpu::CommandBuffer*) noexcept;
@@ -543,6 +543,7 @@ static_assert(gpu::detail::is_same_v<decltype(&gpu::create_device), CreateDevice
 static_assert(gpu::detail::is_same_v<decltype(&gpu::get_drawable_extent), GetDrawableExtentFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::acquire), AcquireFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::create_command_pool), CreateCommandPoolFunction>);
+static_assert(gpu::detail::is_same_v<decltype(&gpu::set_root_pointer), void (*)(gpu::CommandBuffer*, const void*) noexcept>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::destroy_command_pool), CommandPoolFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::reset_command_pool), CommandPoolFunction>);
 static_assert(gpu::detail::is_same_v<decltype(&gpu::read_timestamps), CommandPoolFunction>);

@@ -747,8 +747,9 @@ void destroy_pso(PSO* pso) noexcept;
 
 // Pools retain command storage until destruction. Reset only after every submitted buffer from this pool completes; unsubmitted buffers are discarded.
 // Reset invalidates all previously returned CommandBuffer handles. Use one pool per worker and in-flight frame for independent recording/reuse.
-// Buffers from a pool must be submitted to the selected queue's family.
-[[nodiscard]] CommandPool* create_command_pool(Device* device, uint32 queue_index = 0) noexcept;
+// Buffers from a pool must be submitted to the selected queue's family. Copied roots share a fixed arena, reclaimed on reset.
+// root_capacity includes 16-byte padding per root; zero is valid for pools that only use application-owned roots or copy commands.
+[[nodiscard]] CommandPool* create_command_pool(Device* device, uint32 queue_index = 0, uint64 root_capacity = 4 * 1024 * 1024) noexcept;
 void destroy_command_pool(CommandPool* pool) noexcept;
 void reset_command_pool(CommandPool* pool) noexcept;
 [[nodiscard]] CommandBuffer* begin_commands(CommandPool* pool) noexcept;
@@ -788,7 +789,11 @@ void set_depth_stencil(CommandBuffer* commands, const DepthStencilState& state) 
 
 void bind_pso(CommandBuffer* commands, const PSO* pso) noexcept;
 
-// Draw and dispatch root structures must fit 256 bytes. Larger data belongs in GPU memory referenced by root pointers.
+// Bind a 16-byte-aligned application-owned GPU root, valid through submission completion. Synchronize GPU writes before shader reads.
+// Subsequent draws/dispatches with an empty root retain this binding; a nonempty root replaces it with a command-pool copy.
+void set_root_pointer(CommandBuffer* commands, const void* gpu_root) noexcept;
+
+// CPU root structures must fit 256 bytes and the pool's remaining arena capacity. GPU roots obey native shader resource limits.
 void draw(CommandBuffer* commands, ByteSpan root, uint32 vertex_count, uint32 instance_count = 1, uint32 first_vertex = 0, uint32 first_instance = 0) noexcept;
 void draw_indexed(CommandBuffer* commands, ByteSpan root, GpuRange indices, IndexType type, uint32 index_count, uint32 instance_count = 1,
                   uint32 first_index = 0, int32 vertex_offset = 0, uint32 first_instance = 0) noexcept;

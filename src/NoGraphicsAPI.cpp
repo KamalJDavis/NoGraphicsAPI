@@ -407,7 +407,8 @@ VkAccessFlags2 to_vk(Access accesses)
     VkAccessFlags2 result = 0;
     if (has_flag(accesses, Access::transfer_read)) result |= VK_ACCESS_2_TRANSFER_READ_BIT;
     if (has_flag(accesses, Access::transfer_write)) result |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    if (has_flag(accesses, Access::shader_read)) result |= VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    if (has_flag(accesses, Access::shader_read))
+        result |= VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_UNIFORM_READ_BIT;
     if (has_flag(accesses, Access::shader_write)) result |= VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     if (has_flag(accesses, Access::color_read)) result |= VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
     if (has_flag(accesses, Access::color_write)) result |= VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -584,6 +585,7 @@ struct TimelineSemaphore
 struct CommandBuffer
 {
     Device* state = nullptr;
+    CommandPool* pool = nullptr;
     CommandBuffer* next = nullptr;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
@@ -600,6 +602,8 @@ struct CommandBuffer
 struct CommandPool
 {
     Device* state = nullptr;
+    GpuHeap roots = {};
+    uint64 root_offset = 0;
     VkCommandPool command_pool = VK_NULL_HANDLE;
     CommandBuffer* first = nullptr;
     CommandBuffer* last = nullptr;
@@ -2766,6 +2770,14 @@ void assert_spirv(ByteSpan code) noexcept
     assert(*reinterpret_cast<const uint32*>(code.data) == 0x07230203u && "PSO stage does not contain SPIR-V");
 }
 
+constexpr VkDescriptorSetAndBindingMappingEXT root_mapping{
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_AND_BINDING_MAPPING_EXT,
+    .bindingCount = 1,
+    .resourceMask = VK_SPIRV_RESOURCE_TYPE_UNIFORM_BUFFER_BIT_EXT | VK_SPIRV_RESOURCE_TYPE_READ_ONLY_STORAGE_BUFFER_BIT_EXT,
+    .source = VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT,
+    .sourceData = {.pushAddressOffset = 0},
+};
+
 PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const ShaderStage& fragment, Span<const ColorTargetDesc> color_targets,
                        Format depth_format, Format stencil_format, const RasterizationState& rasterization_state,
                        bool mesh, const ShaderStage& task = {}) noexcept
@@ -2792,22 +2804,30 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
         .codeSize = fragment.code.size,
         .pCode = reinterpret_cast<const uint32*>(fragment.code.data),
     };
+    const VkShaderDescriptorSetAndBindingMappingInfoEXT mappings[]{
+        {.sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT, .pNext = &task_module_info,
+         .mappingCount = 1, .pMappings = &root_mapping},
+        {.sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT, .pNext = &first_stage_module_info,
+         .mappingCount = 1, .pMappings = &root_mapping},
+        {.sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT, .pNext = &fragment_module_info,
+         .mappingCount = 1, .pMappings = &root_mapping},
+    };
     const VkPipelineShaderStageCreateInfo stages[]{
         VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = &task_module_info,
+            .pNext = &mappings[0],
             .stage = VK_SHADER_STAGE_TASK_BIT_EXT,
             .pName = task.entry_point,
         },
         VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = &first_stage_module_info,
+            .pNext = &mappings[1],
             .stage = mesh ? VK_SHADER_STAGE_MESH_BIT_EXT : VK_SHADER_STAGE_VERTEX_BIT,
             .pName = first_stage.entry_point,
         },
         VkPipelineShaderStageCreateInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = &fragment_module_info,
+            .pNext = &mappings[2],
             .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
             .pName = fragment.entry_point,
         },
@@ -2943,9 +2963,15 @@ PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
         .codeSize = compute.code.size,
         .pCode = reinterpret_cast<const uint32*>(compute.code.data),
     };
+    const VkShaderDescriptorSetAndBindingMappingInfoEXT mapping{
+        .sType = VK_STRUCTURE_TYPE_SHADER_DESCRIPTOR_SET_AND_BINDING_MAPPING_INFO_EXT,
+        .pNext = &module_info,
+        .mappingCount = 1,
+        .pMappings = &root_mapping,
+    };
     const VkPipelineShaderStageCreateInfo stage{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .pNext = &module_info,
+        .pNext = &mapping,
         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
         .pName = compute.entry_point,
     };
@@ -2972,7 +2998,7 @@ void destroy_pso(PSO* pso) noexcept
     delete pso;
 }
 
-CommandPool* create_command_pool(Device* device, uint32 queue_index) noexcept
+CommandPool* create_command_pool(Device* device, uint32 queue_index, uint64 root_capacity) noexcept
 {
     assert(device && queue_index < device->queue_count && "create_command_pool requires an available queue index");
     CommandPool* pool = new CommandPool{.state = device, .timestamps = device->queues[queue_index].timestamps};
@@ -2982,6 +3008,7 @@ CommandPool* create_command_pool(Device* device, uint32 queue_index) noexcept
         .queueFamilyIndex = device->queues[queue_index].family_index,
     };
     require_vk(vkCreateCommandPool(device->device, &pool_info, nullptr, &pool->command_pool));
+    if (root_capacity) pool->roots = create_gpu_heap(device, root_capacity);
     return pool;
 }
 
@@ -2999,6 +3026,7 @@ void destroy_command_pool(CommandPool* pool) noexcept
         delete commands;
     }
     vkDestroyCommandPool(pool->state->device, pool->command_pool, nullptr);
+    destroy_gpu_heap(pool->roots);
     delete pool;
 }
 
@@ -3013,6 +3041,7 @@ void reset_command_pool(CommandPool* pool) noexcept
     }
     assert_vk(vkResetCommandPool(pool->state->device, pool->command_pool, 0));
     pool->next_buffer = pool->first;
+    pool->root_offset = 0;
 }
 
 void read_timestamps(CommandPool* pool) noexcept
@@ -3039,7 +3068,7 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
     }
     else
     {
-        commands = new CommandBuffer{.state = pool->state, .command_pool = pool->command_pool};
+        commands = new CommandBuffer{.state = pool->state, .pool = pool, .command_pool = pool->command_pool};
         const VkCommandBufferAllocateInfo allocate_info{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = pool->command_pool,
@@ -3403,19 +3432,28 @@ VkDeviceMemoryImageCopyKHR make_texture_copy_region(const Texture& texture, cons
     };
 }
 
-void emit_root_data(CommandBuffer* commands, ByteSpan root) noexcept
+void set_root_pointer(CommandBuffer* commands, const void* gpu_root) noexcept
 {
-    if (root.size == 0)
-        return;
-    assert(commands->state);
+    assert(commands && gpu_root && (reinterpret_cast<uintptr>(gpu_root) & 15u) == 0);
     const VkPushDataInfoEXT info{
         .sType = VK_STRUCTURE_TYPE_PUSH_DATA_INFO_EXT,
         .data = {
-            .address = root.data,
-            .size = root.size,
+            .address = &gpu_root,
+            .size = sizeof(gpu_root),
         },
     };
     commands->state->fn.cmd_push_data(commands->command_buffer, &info);
+}
+
+void emit_root_data(CommandBuffer* commands, ByteSpan root) noexcept
+{
+    if (root.size == 0) return;
+    CommandPool* pool = commands->pool;
+    const uint64 size = align_up<uint64>(root.size, 16);
+    assert(root.data && pool->root_offset + size <= pool->roots.range.size && "command pool root arena exhausted");
+    memcpy(pool->roots.range.cpu + pool->root_offset, root.data, root.size);
+    set_root_pointer(commands, pool->roots.range.gpu + pool->root_offset);
+    pool->root_offset += size;
 }
 
 void set_texture_descriptor_heap(CommandBuffer* commands, TextureDescriptorHeap* heap) noexcept

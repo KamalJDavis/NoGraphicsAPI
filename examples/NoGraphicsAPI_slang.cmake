@@ -40,7 +40,7 @@ if(NOT APPLE)
 endif()
 
 function(NoGraphicsAPI_compile_slang output source entry stage)
-    cmake_parse_arguments(SLANG "" "" "DEPENDS" ${ARGN})
+    cmake_parse_arguments(SLANG "" "" "DEPENDS;DEFINES;OPTIONS" ${ARGN})
     get_filename_component(output_dir "${output}" DIRECTORY)
     set(dependencies ${source} ${SLANG_DEPENDS}
         ${PROJECT_SOURCE_DIR}/include/NoGraphicsAPI/types.h
@@ -52,6 +52,10 @@ function(NoGraphicsAPI_compile_slang output source entry stage)
         -I ${CMAKE_CURRENT_SOURCE_DIR}
         -I ${PROJECT_SOURCE_DIR}/include
         -I ${PROJECT_SOURCE_DIR}/utility/include)
+    foreach(define IN LISTS SLANG_DEFINES)
+        list(APPEND common_options -D${define})
+    endforeach()
+    list(APPEND common_options ${SLANG_OPTIONS})
     if(APPLE)
         add_custom_command(
             OUTPUT ${output}
