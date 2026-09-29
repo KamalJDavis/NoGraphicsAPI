@@ -168,6 +168,9 @@ so command buffers remain entirely in descriptor-heap mode.
 
 The shader's binding-zero uniform buffer maps directly to the address in push data through
 [`VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`](https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorSetAndBindingMappingEXT.html).
+This preserves uniform-buffer access instead of physical-storage-buffer loads through a BDA pointer,
+allowing the driver to use its constant-buffer optimizations and prefetch paths.
+BDA can receive equivalent optimizations, so any performance advantage depends on the GPU, driver and workload.
 There is no root descriptor or descriptor-set binding. The shader ABI changes from a full push-data
 structure to one address; rebuild existing Vulkan shader binaries. Separate roots per stage and
 GPU-generated binding commands are not exposed. The GPU can select additional data through pointers stored inside the root.
