@@ -15,7 +15,7 @@
 [ForceInline]
 StructuredBuffer<T> gpu_root_aligned_storage<T>(StructuredBuffer<T> storage, constexpr int alignment)
 {
-    __intrinsic_asm "(($TR)__builtin_assume_aligned($0, $1))";
+    __intrinsic_asm "(__builtin_assume((reinterpret_cast<ulong>($0) & ($1 - 1)) == 0), $0)";
 }
 
 [[vk::binding(1)]] ConstantBuffer<uint64_t> gpu_texture_pool_base : register(b1);
@@ -52,19 +52,7 @@ T gpu_sampler<T : IOpaqueDescriptor = SamplerState>(uint index)
 #else
 
 #define GPU_ROOT_DEFAULT(type, name) GPU_ROOT_IMPL(type, name, 4)
-#if defined(NOGRAPHICSAPI_ROOT_PHYSICAL)
-struct GPURootPointer<T> { T* address; };
-// The default preserves natural member alignment, including eight-byte GPU pointers.
-#define GPU_ROOT_IMPL(type, name, alignment) \
-    [[vk::push_constant]] ConstantBuffer<GPURootPointer<type>> name##_storage; \
-    static type name = (alignment) == 4 ? *name##_storage.address : loadAligned<alignment>(name##_storage.address)
-#elif defined(NOGRAPHICSAPI_ROOT_SSBO)
-#define GPU_ROOT_IMPL(type, name, alignment) \
-    [[vk::binding(0, 0)]] StructuredBuffer<type> name##_storage; \
-    static type name = loadAligned<alignment>(__getStructuredBufferElementPtr(name##_storage, 0))
-#else
 #define GPU_ROOT_IMPL(type, name, alignment) [[vk::binding(0, 0)]] ConstantBuffer<type> name
-#endif
 #define GPU_ADDRESS(value) (&(value))
 
 [ForceInline]

@@ -268,42 +268,6 @@ add_test(NAME test_root_data_aligned COMMAND test_root_data ${root_aligned_code}
 set_tests_properties(test_root_data test_root_data_aligned PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
 
-if(NOT APPLE)
-    set(root_benchmark_shaders)
-    foreach(mode IN ITEMS uniform structured physical push)
-        string(TOUPPER ${mode} mode_define)
-        foreach(bytes IN ITEMS 64 256)
-            set(entry computeMain)
-            if(bytes EQUAL 64)
-                set(entry smallMain)
-            endif()
-            set(output ${CMAKE_CURRENT_BINARY_DIR}/root-benchmark/${mode}-${bytes}.spv)
-            NoGraphicsAPI_compile_slang(${output} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang ${entry} compute
-                DEFINES ROOT_DATA_${mode_define} OPTIONS -O3 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
-            list(APPEND root_benchmark_shaders ${output})
-        endforeach()
-    endforeach()
-    foreach(mode IN ITEMS ssbo physical)
-        string(TOUPPER ${mode} mode_define)
-        foreach(alignment IN ITEMS 4 16)
-            foreach(bytes IN ITEMS 64 256)
-                set(entry computeMain)
-                if(bytes EQUAL 64)
-                    set(entry smallMain)
-                endif()
-                set(output ${CMAKE_CURRENT_BINARY_DIR}/root-benchmark/${mode}_aligned${alignment}-${bytes}.spv)
-                NoGraphicsAPI_compile_slang(${output} ${CMAKE_CURRENT_SOURCE_DIR}/root_data.slang ${entry} compute
-                    DEFINES NOGRAPHICSAPI_ROOT_${mode_define} ROOT_DATA_ALIGNMENT=${alignment}
-                    OPTIONS -O3 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/root_data_shared.h)
-                list(APPEND root_benchmark_shaders ${output})
-            endforeach()
-        endforeach()
-    endforeach()
-    add_executable(benchmark_root_data EXCLUDE_FROM_ALL root_data_benchmark.cpp ${root_benchmark_shaders})
-    NoGraphicsAPI_disable_exceptions(benchmark_root_data)
-    target_link_libraries(benchmark_root_data PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGraphicsAPIUtility::allocators)
-endif()
-
 set(shader_abi_code ${CMAKE_CURRENT_BINARY_DIR}/shaders/shader_abi.comp.${NOGRAPHICSAPI_SHADER_EXTENSION})
 NoGraphicsAPI_compile_slang(${shader_abi_code} ${CMAKE_CURRENT_SOURCE_DIR}/shader_abi.slang computeMain compute
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shader_abi_shared.h)

@@ -66,22 +66,15 @@ Use a power of two at least four and satisfy both that promise and the type's na
 This does not change field offsets or allocate memory. The draw/dispatch API still requires a
 16-byte-aligned root address, so its callers can specify 16 explicitly.
 
-Vulkan keeps the uniform-buffer binding by default; the argument does not alter that path. For
-comparison, `-DNOGRAPHICSAPI_ROOT_SSBO` selects a structured-buffer binding and
-`-DNOGRAPHICSAPI_ROOT_PHYSICAL` selects a typed pointer in the same eight-byte push payload.
-SSBO requests `loadAligned<N>`; the physical variant uses it for hints above four bytes.
-Slang 2026.14.1 and 2026.18.2 currently discard
-the alignment operand for descriptor-backed SSBOs. Physical loads retain it, reduced as needed for
-member offsets. The physical path's default four uses natural member alignment, including eight
-bytes for pointer fields, to satisfy Vulkan's scalar-alignment requirement.
+Vulkan uses a uniform-buffer binding; the alignment argument does not change its code generation.
 
 Metal keeps an ordinary typed load for the two-argument default; explicit alignment hints use
-`__builtin_assume_aligned` on the generated packed storage pointer.
+`__builtin_assume` on the generated packed storage pointer.
 The root remains in the `device` address space. `constant` can enable uniform-register preloading,
 but Slang's `ConstantBuffer` lowering currently changes the shared vector/matrix layout, including
 when `ScalarDataLayout` is requested. The alignment hint preserves that layout; it does not request
 constant-address-space access or guarantee vector loads. Source generation is checked with Slang
-2026.18.2; native compilation and performance of this new hint still need validation on a Mac.
+2026.18.2; native root-data and ABI tests pass on M3 Max. No Metal performance gain is claimed.
 
 Recompile Vulkan shaders when adopting this ABI: the push payload is now eight bytes, not the root
 structure itself. The binding uses `VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`; no buffer descriptor is allocated.

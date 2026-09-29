@@ -8,8 +8,3 @@ struct RootData
     uint32 seed;
     uint32 values[60];
 };
-
-struct RootDataPointer
-{
-    RootData* address;
-};

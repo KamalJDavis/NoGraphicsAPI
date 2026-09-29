@@ -56,8 +56,7 @@ struct RootArguments
 Allocate a root from application-owned mapped storage, fill it through the CPU address, then pass its GPU address:
 
 ```cpp
-// frame_data is a gpu::BumpAllocator over a retired frame slot.
-const gpu::GpuCpuRange<RootArguments> root = frame_data.allocate<RootArguments>();
+const gpu::GpuCpuRange<RootArguments> root = bump_allocator.allocate<RootArguments>();
 *root.cpu = {
     .vertices = vertex_memory.gpu,
     .material = material_memory.gpu,
@@ -76,8 +75,8 @@ Material material = *root.material;
 Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
 ```
 
-Draws and dispatches take GPU root pointers directly, including roots written by earlier GPU work. All graphics stages share one root.
-Keep each root allocation alive and stable until its GPU use completes; pass `nullptr` for rootless shaders.
+Draws and dispatches take GPU root pointers directly, including roots written by earlier GPU work. All graphics stages share the same root.
+Keep each root allocation alive and stable until its GPU use completes.
 See the [design comparison](docs/no-graphics-api-comparison.md) for the remaining differences and
 the [shader guide](docs/slang.md) for complete examples.
 
@@ -198,10 +197,6 @@ ctest --preset msvc-release
 
 To open the generated solution in Visual Studio, use `build-msvc/NoGraphicsAPI.sln`.
 For a validation-enabled Debug build, use `msvc-debug` in the build and test commands.
-
-The optional Vulkan root benchmark is built with `cmake --build build-msvc --config Release --target benchmark_root_data`.
-Run `build-msvc/tests/Release/benchmark_root_data.exe build-msvc/tests/root-benchmark` to compare uniform, structured and physical
-root reads, with CPU arena copies or application-owned GPU roots. It reports CPU recording and GPU execution times separately.
 
 If the shader tools are not on `PATH`, supply their locations when configuring. Adjust these example
 paths to your installations:
