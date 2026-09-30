@@ -23,4 +23,6 @@ Onyx has not switched its pinned dependency to this checkout. Its remaining
 adaptations, including shader source/library caching, formats, visibility and
 sampling policy, still live in its dependency-preparation script. Port those
 incrementally before switching; this branch alone is not yet a drop-in Onyx
-replacement. No geometry import is enabled in the game yet.
+replacement. Onyx now integrates arena-backed vertex streams using its existing
+adapter, with arena-wide lock/release synchronization; it has not switched its
+dependency to this checkout.
