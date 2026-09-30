@@ -702,6 +702,11 @@ void submit_and_present(Device* device, const SubmitDesc& desc) noexcept;
 
 // Every non-null returned pointer is 16-byte aligned. GPU heaps are raw blocks for application-side suballocation.
 [[nodiscard]] GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory = MemoryType::cpu_visible) noexcept;
+#if defined(__APPLE__)
+// Metal extension: borrows host storage; address and nonzero byte_count must be 16 KiB aligned.
+// Synchronize CPU writes with GPU reads. Release the wrapper before freeing host storage.
+[[nodiscard]] GpuHeap import_host_memory(Device* device, void* address, uint64 byte_count) noexcept;
+#endif
 void destroy_gpu_heap(const GpuHeap& heap) noexcept;
 
 template<typename T>

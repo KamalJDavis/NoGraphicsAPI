@@ -277,3 +277,11 @@ target_link_libraries(test_shader_abi PRIVATE NoGraphicsAPI::NoGraphicsAPI NoGra
 target_compile_definitions(test_shader_abi PRIVATE NOGRAPHICSAPI_SHADER_ABI_PATH="${shader_abi_code}")
 add_test(NAME test_shader_abi COMMAND test_shader_abi)
 set_tests_properties(test_shader_abi PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+
+if(APPLE)
+    add_executable(test_metal_host_memory metal_host_memory_test.cpp)
+    NoGraphicsAPI_disable_exceptions(test_metal_host_memory)
+    target_link_libraries(test_metal_host_memory PRIVATE NoGraphicsAPI::NoGraphicsAPI)
+    add_test(NAME test_metal_host_memory COMMAND test_metal_host_memory)
+    set_tests_properties(test_metal_host_memory PROPERTIES TIMEOUT 60)
+endif()

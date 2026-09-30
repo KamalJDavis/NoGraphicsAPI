@@ -252,6 +252,11 @@ struct CommandBuffer
     bool render_continuation = false;
     bool acquired = false;
     const PSO* pso = nullptr;
+    Viewport encoded_viewport{};
+    Scissor encoded_scissor{};
+    DepthStencilState encoded_depth{};
+    bool viewport_valid = false, scissor_valid = false, depth_valid = false;
+    uint64 texture_heap_address = 0, sampler_heap_address = 0;
 };
 
 struct DepthStateEntry
@@ -832,6 +837,22 @@ GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory) no
     }
 }
 
+GpuHeap import_host_memory(Device* device, void* address, uint64 byte_count) noexcept
+{
+    @autoreleasepool
+    {
+        assert(address && byte_count && !(reinterpret_cast<uintptr>(address) & 0x3fff) && !(byte_count & 0x3fff));
+        GpuHeapOwner* owner = new GpuHeapOwner{.device = device};
+        owner->buffer = [device->metal newBufferWithBytesNoCopy:address length:byte_count
+            options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked deallocator:nil];
+        if (!owner->buffer) { report_error("host memory import", nil); delete owner; return {}; }
+        register_buffer(device, owner, owner->buffer.gpuAddress, byte_count);
+        add_resident(device, owner->buffer);
+        return {.range = {.cpu = static_cast<byte*>(address),
+            .gpu = reinterpret_cast<byte*>(owner->buffer.gpuAddress), .size = byte_count}, .owner = owner};
+    }
+}
+
 void destroy_gpu_heap(const GpuHeap& heap) noexcept
 {
     @autoreleasepool
@@ -839,7 +860,7 @@ void destroy_gpu_heap(const GpuHeap& heap) noexcept
         if (!heap.owner) return;
         GpuHeapOwner* owner = const_cast<GpuHeapOwner*>(heap.owner);
         unregister_buffer(owner->device, owner);
-        remove_resident(owner->device, owner->device->shader_validation ? (id<MTLAllocation>)owner->buffer : (id<MTLAllocation>)owner->heap);
+        remove_resident(owner->device, (!owner->heap || owner->device->shader_validation) ? (id<MTLAllocation>)owner->buffer : (id<MTLAllocation>)owner->heap);
         [owner->buffer release];
         [owner->heap release];
         delete owner;
@@ -1294,6 +1315,7 @@ CommandBuffer* begin_commands(CommandPool* pool) noexcept
         [context->arguments setAddress:0 atIndex:0];
         [context->arguments setAddress:0 atIndex:1];
         [context->arguments setAddress:0 atIndex:2];
+        context->texture_heap_address = context->sampler_heap_address = 0;
         context->timestamp_count = 0;
         context->pso = nullptr;
         context->recording = true;
@@ -1392,19 +1414,25 @@ void submit_and_present(Device* device, const SubmitDesc& desc) noexcept
 
 void set_texture_descriptor_heap(CommandBuffer* commands, TextureDescriptorHeap* heap) noexcept
 {
+    assert(commands->recording && heap->device == commands->device);
+    const uint64 address = heap->base.gpuAddress;
+    if (commands->texture_heap_address == address) return;
+    commands->texture_heap_address = address;
     @autoreleasepool
     {
-        assert(commands->recording && heap->device == commands->device);
-        [commands->arguments setAddress:heap->base.gpuAddress atIndex:1];
+        [commands->arguments setAddress:address atIndex:1];
     }
 }
 
 void set_sampler_descriptor_heap(CommandBuffer* commands, SamplerDescriptorHeap* heap) noexcept
 {
+    assert(commands->recording && heap->device == commands->device);
+    const uint64 address = heap->buffer.gpuAddress;
+    if (commands->sampler_heap_address == address) return;
+    commands->sampler_heap_address = address;
     @autoreleasepool
     {
-        assert(commands->recording && heap->device == commands->device);
-        [commands->arguments setAddress:heap->buffer.gpuAddress atIndex:2];
+        [commands->arguments setAddress:address atIndex:2];
     }
 }
 
@@ -1662,6 +1690,9 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
                                           MTL4RenderEncoderOptionSuspending : MTL4RenderEncoderOptionNone;
         if ((static_cast<uint32>(flags) & static_cast<uint32>(RenderingFlags::resuming)) != 0) options |= MTL4RenderEncoderOptionResuming;
         commands->render = [[native_commands(commands) renderCommandEncoderWithDescriptor:commands->pass options:options] retain];
+        // Dynamic encoder state does not survive a new render pass. Argument
+        // table addresses belong to the command buffer and do survive it.
+        commands->viewport_valid = commands->scissor_valid = commands->depth_valid = false;
         [commands->render setArgumentTable:commands->arguments atStages:render_stages];
         [commands->render setFrontFacingWinding:MTLWindingCounterClockwise];
         [commands->render setViewport:MTLViewport{0, double(height ? height : 1), double(width ? width : 1), -double(height ? height : 1), 0, 1}];
@@ -1692,10 +1723,15 @@ void end_render_pass(CommandBuffer* commands) noexcept
 
 void set_viewport(CommandBuffer* commands, const Viewport& viewport) noexcept
 {
+    assert(commands->recording);
+    if (!commands->render) return;
+    const Viewport& old = commands->encoded_viewport;
+    if (commands->viewport_valid && old.x == viewport.x && old.y == viewport.y && old.width == viewport.width &&
+        old.height == viewport.height && old.min_depth == viewport.min_depth && old.max_depth == viewport.max_depth) return;
+    commands->encoded_viewport = viewport;
+    commands->viewport_valid = true;
     @autoreleasepool
     {
-        assert(commands->recording);
-        if (!commands->render) return;
         [commands->render setViewport:MTLViewport{viewport.x, double(viewport.y) + viewport.height, viewport.width, -double(viewport.height),
                                                 viewport.min_depth, viewport.max_depth}];
     }
@@ -1703,21 +1739,29 @@ void set_viewport(CommandBuffer* commands, const Viewport& viewport) noexcept
 
 void set_scissor(CommandBuffer* commands, const Scissor& scissor) noexcept
 {
+    assert(commands->recording);
+    if (!commands->render) return;
+    const Scissor& old = commands->encoded_scissor;
+    if (commands->scissor_valid && old.x == scissor.x && old.y == scissor.y && old.width == scissor.width && old.height == scissor.height) return;
+    commands->encoded_scissor = scissor;
+    commands->scissor_valid = true;
     @autoreleasepool
     {
-        assert(commands->recording);
-        if (!commands->render) return;
         [commands->render setScissorRect:MTLScissorRect{static_cast<NSUInteger>(scissor.x), static_cast<NSUInteger>(scissor.y), scissor.width, scissor.height}];
     }
 }
 
 void set_depth_stencil(CommandBuffer* commands, const DepthStencilState& state) noexcept
 {
+    assert(commands->recording);
+    if (!commands->render) return;
+    const DepthStencilState& old = commands->encoded_depth;
+    if (commands->depth_valid && same_depth(old, state) && old.front.reference == state.front.reference && old.back.reference == state.back.reference) return;
+    commands->encoded_depth = state;
+    commands->depth_valid = true;
     @autoreleasepool
     {
-        assert(commands->recording);
         id<MTLDepthStencilState> depth = depth_state(commands->pool, state);
-        if (!commands->render) return;
         [commands->render setDepthStencilState:depth];
         [commands->render setStencilFrontReferenceValue:state.front.reference backReferenceValue:state.back.reference];
     }
